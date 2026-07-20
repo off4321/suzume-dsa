@@ -117,7 +117,7 @@ def write_tensors(w: "gguf.GGUFWriter", model: SuzumeGlmDsa) -> None:
 def write_minimal_tokenizer(w: "gguf.GGUFWriter", cfg: GlmDsaConfig) -> None:
     """疎通確認用の最小 SPM トークナイザ（0=<unk>,1=<s>,2=</s>, 以降ダミー）。
 
-    本番では suzume-muon の SentencePiece 語彙を書き出す（学習ループ移植時に対応）。
+    本番は SentencePiece 語彙（SPTokenizer）を渡す（write_sp_tokenizer）。
     """
     tokens, scores, toktypes = [], [], []
     T = gguf.TokenType
@@ -140,11 +140,26 @@ def write_minimal_tokenizer(w: "gguf.GGUFWriter", cfg: GlmDsaConfig) -> None:
     w.add_unk_token_id(0)
 
 
-def export(model: SuzumeGlmDsa, path: str, with_tokenizer: bool = True) -> str:
+def write_sp_tokenizer(w: "gguf.GGUFWriter", tokenizer) -> None:
+    """SentencePiece(SPTokenizer) の実語彙を llama(SPM) 形式で書き出す。"""
+    tokens, scores, types = tokenizer.gguf_vocab()
+    w.add_tokenizer_model("llama")
+    w.add_token_list(tokens)
+    w.add_token_scores(scores)
+    w.add_token_types(types)
+    w.add_unk_token_id(1)
+    w.add_bos_token_id(2)
+    w.add_eos_token_id(3)
+
+
+def export(model: SuzumeGlmDsa, path: str, with_tokenizer: bool = True,
+           tokenizer=None) -> str:
     w = gguf.GGUFWriter(path, arch="glm-dsa")
     write_metadata(w, model.cfg)
-    if with_tokenizer:
-        write_minimal_tokenizer(w, model.cfg)
+    if tokenizer is not None and hasattr(tokenizer, "gguf_vocab"):
+        write_sp_tokenizer(w, tokenizer)          # 本番: 実 SentencePiece 語彙
+    elif with_tokenizer:
+        write_minimal_tokenizer(w, model.cfg)     # 疎通: バイト単位ダミー
     write_tensors(w, model)
     w.write_header_to_file()
     w.write_kv_data_to_file()
