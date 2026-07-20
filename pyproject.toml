@@ -1,0 +1,28 @@
+[project]
+name = "suzume-dsa"
+version = "0.1.0"
+description = "GGUF/llama.cpp ネイティブな glm-dsa 系小型 LLM（モデル名 suzume）"
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+]
+
+[project.optional-dependencies]
+train = [
+    "datasets",
+    "sentencepiece",
+    "tqdm",
+]
+export = [
+    "gguf",
+]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
