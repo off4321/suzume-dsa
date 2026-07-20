@@ -33,6 +33,13 @@ class GlmDsaConfig:
     q_lora_rank: int = 1152       # Q 側の低ランク圧縮次元
     kv_lora_rank: int = 512       # K/V 共有の潜在次元 c_kv
     rope_base: float = 10000.0
+    n_ctx_train: int = 4096       # 学習系列長（GGUF メタデータ用）
+
+    # --- DSA indexer（v1 では重みを持たず、メタデータのみ書く。llama.cpp が
+    #     indexer テンソル不在を検知して素の MLA にフォールバックする）---
+    indexer_n_head: int = 8
+    indexer_head_size: int = 64
+    indexer_top_k: int = 2048
 
     # --- FFN / MoE ---
     n_ff: int = 4096              # 密 FFN の中間次元（先頭 dense 層用）

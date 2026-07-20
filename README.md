@@ -62,6 +62,20 @@ docs/                  gguf-scope / glm-dsa-tensors / training-efficiency
 - [x] 学習効率化の移植方針（docs/training-efficiency.md）
 - [x] **v1 モデル定義（素MLA + MoE、SUZUME_4B = total 4.03B / active 1.43B 実測）**
 - [x] 形状・疎通テスト（tests/test_shapes.py, 4件パス）
+- [x] **GGUF エクスポート（gguf-py 直書き `export_gguf.py`）+ llama.cpp 実ロード疎通確認**
+      （arch=glm-dsa 認識・全メタデータ一致・生成到達）+ 契約テスト（tests/test_export.py）
 - [ ] 学習ループ移植（data / pipeline / sft を suzume-muon から。系列長カリキュラム等の効率化込み）
-- [ ] GGUF エクスポート（HF形式 → conversion/glm.py）
+- [ ] 本番トークナイザ書き出し（現状は疎通用の最小 SPM。SentencePiece 語彙へ差し替え）
 - [ ] v2: DSA indexer / v3: NextN
+
+## GGUF エクスポート
+
+```bash
+cd src && python -m suzume_dsa.export_gguf out.gguf   # TINY を書き出し
+# llama.cpp で確認:
+/workspace/llama.cpp/build/bin/llama-cli -m out.gguf -p "..." -n 8
+```
+
+HF 形式を経由せず、`export_gguf.py` が llama.cpp のテンソル名・メタデータを直接書く。
+MLA は MQA 化して格納（n_head_kv=1）。3D 因子 wk_b/wv_b のみ ne 軸順に合わせて転置。
+v1 は indexer/NextN の重みを持たず、indexer はメタデータのみ（llama.cpp がフォールバック）。
