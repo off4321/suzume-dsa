@@ -1,0 +1,2 @@
+[console_scripts]
+suzume-dsa-train = suzume_dsa.train:main

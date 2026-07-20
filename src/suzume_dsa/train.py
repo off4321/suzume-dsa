@@ -21,7 +21,10 @@ import torch
 import torch.nn.functional as F
 
 from .config import TINY, GlmDsaConfig
-from .data import ByteTokenizer, PackedDataset, load_corpus_tokens
+from .data import (
+    ByteTokenizer, TokenWindows, block_size_at, load_corpus_tokens,
+    parse_block_size_schedule,
+)
 from .model import SuzumeGlmDsa
 
 
@@ -62,24 +65,28 @@ def load_checkpoint(path: Path, model, opt) -> int:
 
 def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size: int,
           lr: float, out_dir: str, tokenizer=None, resume: str | None = None,
+          block_size_schedule: str | None = None,
           grad_clip: float = 1.0, log_every: int = 10, ckpt_every: int = 200,
           device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     torch.manual_seed(seed)
     tokenizer = tokenizer or ByteTokenizer()
     tokens = load_corpus_tokens(corpus, tokenizer)
-    data = PackedDataset(tokens, block_size)
+    data = TokenWindows(tokens)
+
+    # 系列長カリキュラム: 指定があれば step ごとに block を決める純関数、無ければ固定。
+    schedule = parse_block_size_schedule(block_size_schedule, steps) if block_size_schedule else None
 
     model = SuzumeGlmDsa(cfg).to(device).train()
     opt = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
 
     start = load_checkpoint(Path(resume), model, opt) if resume else 0
     gen = torch.Generator().manual_seed(seed)
-    stream = data.batches(batch_size, generator=gen)
     out = Path(out_dir)
 
     n_skipped = 0
     for step in range(start, steps):
-        x, y = next(stream)
+        cur_block = block_size_at(step, schedule) if schedule else block_size
+        x, y = data.sample(batch_size, cur_block, generator=gen)
         x, y = x.to(device), y.to(device)
         logits, info = model(x)
         loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef)
@@ -100,7 +107,7 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
         model.commit_router_bias_updates()          # aux-free ロードバランス
 
         if step % log_every == 0:
-            print(f"step {step:>6} | loss {parts['main']:.4f} "
+            print(f"step {step:>6} | block {cur_block:>4} | loss {parts['main']:.4f} "
                   f"| mtp {parts['mtp']:.4f} | skipped {n_skipped}")
         if ckpt_every and step > start and step % ckpt_every == 0:
             save_checkpoint(out / f"checkpoint_step{step}.pt", model, opt, step)
@@ -115,6 +122,8 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--block-size", type=int, default=256)
+    ap.add_argument("--block-size-schedule", default=None,
+                    help='系列長カリキュラム。例 "0%%:64,50%%:128,80%%:256"（絶対step混在可）')
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--out", default="output")
     ap.add_argument("--resume", default=None)
@@ -123,8 +132,8 @@ def main() -> None:
 
     # 既定は TINY（バイト単位トークナイザ、vocab=256）。本番は cfg と tokenizer を差し替える。
     train(TINY, args.corpus, steps=args.steps, batch_size=args.batch_size,
-          block_size=args.block_size, lr=args.lr, out_dir=args.out,
-          resume=args.resume, device=args.device)
+          block_size=args.block_size, block_size_schedule=args.block_size_schedule,
+          lr=args.lr, out_dir=args.out, resume=args.resume, device=args.device)
 
 
 if __name__ == "__main__":

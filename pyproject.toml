@@ -4,21 +4,43 @@ version = "0.1.0"
 description = "GGUF/llama.cpp ネイティブな glm-dsa 系小型 LLM（モデル名 suzume）"
 requires-python = ">=3.10"
 dependencies = [
-    "torch",
+    "datasets>=2.0.0",
+    "sentencepiece>=0.2.1",
+    "tqdm>=4.60.0",
+    "numpy>=1.24",
 ]
 
-[project.optional-dependencies]
-train = [
-    "datasets",
-    "sentencepiece",
-    "tqdm",
+[project.scripts]
+suzume-dsa-train = "suzume_dsa.train:main"
+
+# --- PyTorch を CPU / CUDA で切り替える（suzume-muon と同じ方式）-----------
+# GPU なし(開発コンテナ): uv run ...            （既定で cpu 版）
+# GPU あり(本番)        : uv run --no-group cpu --group cu124 ...
+[dependency-groups]
+cpu = ["torch>=2.4.0"]
+cu124 = ["torch>=2.4.0", "bitsandbytes>=0.43.0"]
+export = ["gguf>=0.10.0"]
+dev = ["pytest>=8.0"]
+
+[tool.uv]
+default-groups = ["cpu"]
+conflicts = [[{ group = "cpu" }, { group = "cu124" }]]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu124", group = "cu124" },
 ]
-export = [
-    "gguf",
-]
-dev = [
-    "pytest",
-]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [tool.setuptools.packages.find]
 where = ["src"]

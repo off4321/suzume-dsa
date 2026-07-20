@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: suzume-dsa
+Version: 0.1.0
+Summary: GGUF/llama.cpp ネイティブな glm-dsa 系小型 LLM（モデル名 suzume）
+Requires-Python: >=3.10
+Requires-Dist: datasets>=2.0.0
+Requires-Dist: sentencepiece>=0.2.1
+Requires-Dist: tqdm>=4.60.0
+Requires-Dist: numpy>=1.24
