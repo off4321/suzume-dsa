@@ -64,9 +64,23 @@ docs/                  gguf-scope / glm-dsa-tensors / training-efficiency
 - [x] 形状・疎通テスト（tests/test_shapes.py, 4件パス）
 - [x] **GGUF エクスポート（gguf-py 直書き `export_gguf.py`）+ llama.cpp 実ロード疎通確認**
       （arch=glm-dsa 認識・全メタデータ一致・生成到達）+ 契約テスト（tests/test_export.py）
-- [ ] 学習ループ移植（data / pipeline / sft を suzume-muon から。系列長カリキュラム等の効率化込み）
-- [ ] 本番トークナイザ書き出し（現状は疎通用の最小 SPM。SentencePiece 語彙へ差し替え）
-- [ ] v2: DSA indexer / v3: NextN
+- [x] **(a) 最小 pretrain ループ**（`data.py` + `train.py`）: 次トークンCE + MTP補助 +
+      aux-free bias commit + 非有限勾配ガード + checkpoint/resume。TINY で loss 5.56→1.58
+      を確認、学習→export→llama.cpp ロードまで一気通し済み
+- [ ] 学習効率化のループ側移植（系列長カリキュラム `--block-size-schedule` / 深さ成長 /
+      μP / WSD / Muon / FIM / 動的データ選別）
+- [ ] 本番データ・トークナイザ（現状は疎通用のバイト単位 tokenizer。SentencePiece 語彙へ）
+- [ ] SFT ステージ移植 / v2: DSA indexer / v3: NextN
+
+## 最小 pretrain
+
+```bash
+cd src && python -m suzume_dsa.train --corpus mytext.txt --steps 200
+# TINY(vocab=256, バイト単位) で回る。本番は cfg=SUZUME_4B + SentencePiece へ差し替え。
+```
+
+現状ループに配線済みの効率化: **MTP補助損失**・**aux-free MoEバランス**・**非有限勾配ガード**
+（suzume-muon の nan 事件の教訓）。系列長カリキュラム等のループ側効率化は次段で追加。
 
 ## GGUF エクスポート
 
