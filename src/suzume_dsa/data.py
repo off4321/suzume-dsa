@@ -31,8 +31,10 @@ class ByteTokenizer:
 def load_corpus_tokens(source, tokenizer) -> torch.Tensor:
     """テキスト source を 1 次元の LongTensor トークン列にする。
 
-    source: テキストファイルのパス / 生文字列 / 文字列のリスト。
+    source: 既にトークン化済みの Tensor / テキストファイルのパス / 生文字列 / 文字列のリスト。
     """
+    if isinstance(source, torch.Tensor):
+        return source
     if isinstance(source, (list, tuple)):
         text = "\n".join(source)
     elif _is_existing_file(source):

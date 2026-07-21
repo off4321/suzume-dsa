@@ -134,4 +134,44 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
     return model
 
 
+def main() -> None:
+    import argparse
+    from dataclasses import replace
+
+    from .config import SUZUME_4B
+    from .tokenizer import SPTokenizer
+
+    ap = argparse.ArgumentParser(description="suzume-dsa SFT")
+    ap.add_argument("--sp-model", required=True, help="SentencePiece .model")
+    ap.add_argument("--init-from", required=True, help="事前学習済み checkpoint(.pt)")
+    ap.add_argument("--hf-sft-dataset", required=True,
+                    help='会話データ "path[:config][:split]"（messages/conversations カラム）')
+    ap.add_argument("--hf-max-samples", type=int, default=None)
+    ap.add_argument("--steps", type=int, default=2000)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--max-len", type=int, default=2048)
+    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--optimizer", default="adamw", choices=["adamw", "muon"])
+    ap.add_argument("--lr-schedule", default="cosine", choices=["cosine", "wsd"])
+    ap.add_argument("--warmup", type=int, default=100)
+    ap.add_argument("--out", default="output_sft")
+    ap.add_argument("--ckpt-every", type=int, default=500)
+    ap.add_argument("--device", default="cpu")
+    args = ap.parse_args()
+
+    tok = SPTokenizer(args.sp_model)
+    cfg = replace(SUZUME_4B, vocab_size=tok.vocab_size)
+    convs = load_sft_conversations(args.hf_sft_dataset, max_samples=args.hf_max_samples)
+    print(f"会話 {len(convs)} 件を読込")
+    sft_train(cfg, convs, tok, steps=args.steps, batch_size=args.batch_size,
+              max_len=args.max_len, lr=args.lr, out_dir=args.out,
+              init_from=args.init_from, optimizer=args.optimizer,
+              lr_schedule=args.lr_schedule, warmup=args.warmup,
+              ckpt_every=args.ckpt_every, device=args.device)
+
+
 __all__ = ["SFTDataset", "sft_loss", "sft_train", "load_sft_conversations"]
+
+
+if __name__ == "__main__":
+    main()

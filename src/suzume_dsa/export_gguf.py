@@ -168,10 +168,33 @@ def export(model: SuzumeGlmDsa, path: str, with_tokenizer: bool = True,
     return path
 
 
-if __name__ == "__main__":
-    from .config import TINY
+def main() -> None:
+    import argparse
 
-    out = sys.argv[1] if len(sys.argv) > 1 else "suzume-tiny.gguf"
-    model = SuzumeGlmDsa(TINY).eval()
-    export(model, out)
-    print("wrote", out)
+    ap = argparse.ArgumentParser(description="suzume-dsa → GGUF エクスポート")
+    ap.add_argument("--checkpoint", help="学習済み checkpoint(.pt)。省略時は TINY を書き出し")
+    ap.add_argument("--sp-model", help="SentencePiece .model（本番語彙を GGUF に埋め込む）")
+    ap.add_argument("--out", default="suzume.gguf")
+    args = ap.parse_args()
+
+    tok = None
+    if args.checkpoint:
+        import torch
+        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        model = SuzumeGlmDsa(ckpt["cfg"])
+        model.load_state_dict(ckpt["model"])
+    else:
+        from .config import TINY
+        model = SuzumeGlmDsa(TINY)
+    model.eval()
+
+    if args.sp_model:
+        from .tokenizer import SPTokenizer
+        tok = SPTokenizer(args.sp_model)
+
+    export(model, args.out, tokenizer=tok)
+    print(f"wrote {args.out}  (vocab={'SP:'+args.sp_model if tok else 'byte-dummy'})")
+
+
+if __name__ == "__main__":
+    main()

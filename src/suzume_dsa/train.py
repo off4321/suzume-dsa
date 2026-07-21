@@ -175,8 +175,11 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="suzume-dsa 最小 pretrain")
-    ap.add_argument("--corpus", required=True, help="テキストファイル / 文字列")
+    ap = argparse.ArgumentParser(description="suzume-dsa pretrain")
+    ap.add_argument("--corpus", default=None, help="テキストファイル / 文字列")
+    ap.add_argument("--hf-dataset", default=None,
+                    help='HFデータセット "path[:config][:split][:column]"（--sp-model と併用）')
+    ap.add_argument("--hf-max-samples", type=int, default=None, help="HFから読む上限行数")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--block-size", type=int, default=256)
@@ -210,7 +213,15 @@ def main() -> None:
         tok = SPTokenizer(args.sp_model)
         cfg = replace(SUZUME_4B, vocab_size=tok.vocab_size)
 
-    train(cfg, args.corpus, steps=args.steps, batch_size=args.batch_size,
+    # コーパス: --hf-dataset があれば HF から（SP 語彙でトークン化）、無ければ --corpus。
+    corpus = args.corpus
+    if args.hf_dataset:
+        assert tok is not None, "--hf-dataset は --sp-model が必要です"
+        from .data import load_hf_tokens
+        corpus = load_hf_tokens(args.hf_dataset, tok, max_samples=args.hf_max_samples)
+    assert corpus is not None, "--corpus か --hf-dataset のどちらかが必要です"
+
+    train(cfg, corpus, steps=args.steps, batch_size=args.batch_size,
           block_size=args.block_size, block_size_schedule=args.block_size_schedule,
           lr=args.lr, out_dir=args.out, resume=args.resume, init_from=args.init_from,
           tokenizer=tok, optimizer=args.optimizer, muon_lr=args.muon_lr,
