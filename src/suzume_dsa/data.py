@@ -209,19 +209,56 @@ def parse_block_size_schedule(spec: str, max_steps: int) -> list[tuple[int, int]
     return items
 
 
-def block_size_at(step: int, schedule: list[tuple[int, int]]) -> int:
-    """step 時点で有効な block_size（step 以下で最大の閾値の値）。"""
-    block = schedule[0][1]
-    for thr, blk in schedule:
+def schedule_value_at(step: int, schedule: list[tuple[int, int]]) -> int:
+    """step 時点で有効な値（step 以下で最大の閾値のもの）。block/batch 共通の探索。"""
+    value = schedule[0][1]
+    for thr, val in schedule:
         if step >= thr:
-            block = blk
+            value = val
         else:
             break
-    return block
+    return value
+
+
+def block_size_at(step: int, schedule: list[tuple[int, int]]) -> int:
+    """step 時点で有効な block_size。"""
+    return schedule_value_at(step, schedule)
+
+
+def parse_batch_size_schedule(spec: str, max_steps: int) -> list[tuple[int, int]]:
+    """"0:16,50%:8" を [(step, batch), ...] に。バッチカリキュラム。
+
+    系列長カリキュラム（--block-size-schedule）と対で使い、block を伸ばす step で
+    batch を下げて VRAM をほぼ一定に保つ（VRAM ≈ 固定分 + batch×block×係数）。
+    block と違い batch は増減どちらの向きも許可。step は絶対値か --steps 比の "%"、
+    step0（または 0%）必須・昇順。step の純関数なので --resume と整合する。
+    """
+    items: list[tuple[int, int]] = []
+    for part in spec.split(","):
+        key, _, val = part.strip().partition(":")
+        key = key.strip()
+        if key.endswith("%"):
+            step = round(float(key[:-1]) / 100.0 * max_steps)
+        else:
+            step = int(key)
+        batch = int(val)
+        assert batch >= 1, f"batch は 1 以上: {part}"
+        items.append((step, batch))
+    items.sort(key=lambda kv: kv[0])
+    assert items[0][0] == 0, "スケジュールは step0（または 0%）から始めること"
+    steps_only = [s for s, _ in items]
+    assert steps_only == sorted(set(steps_only)), "step は昇順かつ重複なし"
+    return items
+
+
+def batch_size_at(step: int, schedule: list[tuple[int, int]]) -> int:
+    """step 時点で有効な batch_size。"""
+    return schedule_value_at(step, schedule)
 
 
 __all__ = [
     "ByteTokenizer", "load_corpus_tokens", "PackedDataset", "TokenWindows",
-    "parse_block_size_schedule", "block_size_at",
+    "parse_block_size_schedule", "block_size_at", "schedule_value_at",
+    "parse_batch_size_schedule", "batch_size_at",
     "preview_hf_dataset", "load_hf_tokens",
 ]

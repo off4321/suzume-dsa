@@ -15,16 +15,16 @@ data -> model -> loss(次トークン CE + MTP 補助) -> step -> checkpoint -> 
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 
-from .config import TINY, GlmDsaConfig
+from .config import PRESETS, SUZUME_4B, TINY, GlmDsaConfig
 from .data import (
-    ByteTokenizer, TokenWindows, block_size_at, load_corpus_tokens,
-    parse_block_size_schedule,
+    ByteTokenizer, TokenWindows, batch_size_at, block_size_at,
+    load_corpus_tokens, parse_batch_size_schedule, parse_block_size_schedule,
 )
 from .fim import build_fim_batch
 from .model import SuzumeGlmDsa
@@ -102,6 +102,7 @@ def _mup_lr(lr: float, cfg: GlmDsaConfig, mup: bool, base_width: int) -> float:
 def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size: int,
           lr: float, out_dir: str, tokenizer=None, resume: str | None = None,
           init_from: str | None = None, block_size_schedule: str | None = None,
+          batch_size_schedule: str | None = None,
           optimizer: str = "adamw", muon_lr: float = 0.02,
           lr_schedule: str = "cosine", warmup: int = 0, wsd_decay_frac: float = 0.2,
           mup: bool = False, mup_base_width: int = 256,
@@ -116,6 +117,8 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
 
     # 系列長カリキュラム: 指定があれば step ごとに block を決める純関数、無ければ固定。
     schedule = parse_block_size_schedule(block_size_schedule, steps) if block_size_schedule else None
+    # バッチカリキュラム: block を伸ばす step に合わせて batch を下げ VRAM を一定に保つ。
+    batch_sched = parse_batch_size_schedule(batch_size_schedule, steps) if batch_size_schedule else None
 
     # FIM: tokenizer が FIM センチネルを持つときだけ有効化。
     fim_ids = None
@@ -138,11 +141,12 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
     n_skipped = 0
     for step in range(start, steps):
         cur_block = block_size_at(step, schedule) if schedule else block_size
+        cur_batch = batch_size_at(step, batch_sched) if batch_sched else batch_size
         if fim_ids is not None:
-            x, y = build_fim_batch(tokens, batch_size, cur_block, fim_ids, gen,
+            x, y = build_fim_batch(tokens, cur_batch, cur_block, fim_ids, gen,
                                    fim_rate, fim_spm_prob)
         else:
-            x, y = data.sample(batch_size, cur_block, generator=gen)
+            x, y = data.sample(cur_batch, cur_block, generator=gen)
         x, y = x.to(device), y.to(device)
         logits, info = model(x)
         loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef, select_topp)
@@ -164,9 +168,9 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
         model.commit_router_bias_updates()          # aux-free ロードバランス
 
         if step % log_every == 0:
-            print(f"step {step:>6} | block {cur_block:>4} | loss {parts['main']:.4f} "
-                  f"| mtp {parts['mtp']:.4f} | lr {sched.get_last_lr()[0]:.2e} "
-                  f"| skipped {n_skipped}")
+            print(f"step {step:>6} | block {cur_block:>4} | batch {cur_batch:>3} "
+                  f"| loss {parts['main']:.4f} | mtp {parts['mtp']:.4f} "
+                  f"| lr {sched.get_last_lr()[0]:.2e} | skipped {n_skipped}")
         if ckpt_every and step > start and step % ckpt_every == 0:
             save_checkpoint(out / f"checkpoint_step{step}.pt", model, opt, step)
 
@@ -185,6 +189,9 @@ def main() -> None:
     ap.add_argument("--block-size", type=int, default=256)
     ap.add_argument("--block-size-schedule", default=None,
                     help='系列長カリキュラム。例 "0%%:64,50%%:128,80%%:256"（絶対step混在可）')
+    ap.add_argument("--batch-size-schedule", default=None,
+                    help='バッチカリキュラム。例 "0:16,50%%:8"。block を伸ばす step で '
+                         'batch を下げ VRAM を一定化（--batch-size より優先）')
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--out", default="output")
     ap.add_argument("--resume", default=None)
@@ -203,15 +210,40 @@ def main() -> None:
     ap.add_argument("--select-topp", type=float, default=1.0,
                     help="選択的 backprop: 損失上位この割合のトークンだけ学習（<1.0 で有効）")
     ap.add_argument("--sp-model", default=None, help="SentencePiece .model（本番語彙）")
+    # モデル寸法: プリセット選択 + 個別レバー上書き（GlmDsaConfig の全フィールド）
+    ap.add_argument("--preset", default=None, choices=["4b", "05b", "tiny"],
+                    help="基準構成。既定: --sp-model ありで 4b、無しで tiny")
+    for f in fields(GlmDsaConfig):
+        default = getattr(SUZUME_4B, f.name)
+        if isinstance(default, bool):
+            ap.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name,
+                            action=argparse.BooleanOptionalAction, default=None,
+                            help=f"config 上書き（既定 {default}）")
+        else:
+            ap.add_argument(f"--{f.name.replace('_', '-')}", dest=f.name,
+                            type=type(default), default=None,
+                            help=f"config 上書き（既定 {default}）")
     args = ap.parse_args()
 
     # tokenizer: --sp-model 指定時は本番 SentencePiece、無ければ疎通用バイト単位。
-    cfg, tok = TINY, None
+    tok = None
     if args.sp_model:
-        from .config import SUZUME_4B
         from .tokenizer import SPTokenizer
         tok = SPTokenizer(args.sp_model)
-        cfg = replace(SUZUME_4B, vocab_size=tok.vocab_size)
+
+    # 基準 config: --preset 明示 > (sp-model ありで 4b / 無しで tiny)。
+    if args.preset:
+        cfg = PRESETS[args.preset]
+    else:
+        cfg = SUZUME_4B if args.sp_model else TINY
+    # 個別レバー上書き（None でないフィールドだけ）
+    overrides = {f.name: getattr(args, f.name) for f in fields(GlmDsaConfig)
+                 if getattr(args, f.name, None) is not None}
+    if overrides:
+        cfg = replace(cfg, **overrides)
+    # 本番語彙に合わせて vocab_size を差し替え（--vocab-size 明示があればそちら優先）
+    if tok is not None and "vocab_size" not in overrides:
+        cfg = replace(cfg, vocab_size=tok.vocab_size)
 
     # コーパス: --hf-dataset があれば HF から（SP 語彙でトークン化）、無ければ --corpus。
     corpus = args.corpus
@@ -223,6 +255,7 @@ def main() -> None:
 
     train(cfg, corpus, steps=args.steps, batch_size=args.batch_size,
           block_size=args.block_size, block_size_schedule=args.block_size_schedule,
+          batch_size_schedule=args.batch_size_schedule,
           lr=args.lr, out_dir=args.out, resume=args.resume, init_from=args.init_from,
           tokenizer=tok, optimizer=args.optimizer, muon_lr=args.muon_lr,
           lr_schedule=args.lr_schedule, warmup=args.warmup,

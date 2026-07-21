@@ -96,6 +96,66 @@ uv run suzume-dsa-export \
 学習前のサイズ・VRAM 確認: `uv run tools/count_params.py` /
 `uv run --no-group cpu --group cu124 tools/vram_calibrate.py --block-size 4096 --device cuda`。
 
+## 本番パイプライン（B: 0.5B トライ一気通し）
+
+いきなり 4B は 30〜60B トークン必要で単一 GPU では月単位。まず **0.5B（`SUZUME_05B`
+= total 460M / active 201M）でパイプライン全体を安く検証**するのを推奨。同じ glm-dsa
+アーキで寸法だけ縮小したもの。Chinchilla×20 ≈ 4B トークンなので手持ちコーパスでも回せる。
+本番データの学習は Google Colab（RTX PRO 6000 Blackwell 96GB）で実施する前提。
+
+`train.py` は `--preset {4b,05b,tiny}` と個別レバー（`--n-embd`/`--n-layer`/`--n-expert`
+…= `GlmDsaConfig` 全フィールド）で寸法を指定できる。SFT/export は `--init-from` /
+`--checkpoint` に保存された cfg を自動継承するので、寸法指定は事前学習の 1 回だけでよい。
+
+```bash
+# 0. GPU 版 torch
+uv sync --no-group cpu --group cu124
+
+# 1. トークナイザ（4B と共通。既にあれば流用）
+uv run tools/train_tokenizer.py \
+    --hf-dataset "range3/wikipedia-ja-20230101" --hf-max-samples 1000000 \
+    --vocab-size 32000 --out tokenizer/sp
+
+# 1.5 サイズと VRAM を事前確認（0.5B 構成で）
+uv run tools/count_params.py --n-embd 1024 --n-layer 12 --n-head 8 \
+    --q-lora-rank 768 --kv-lora-rank 384 --n-ff 2816 --n-ff-exp 640 \
+    --n-expert 16 --n-expert-used 4        # → total 460M / active 201M
+uv run --no-group cpu --group cu124 tools/vram_calibrate.py \
+    --n-embd 1024 --n-layer 12 --block-size 4096 --device cuda   # 収まる最大 batch
+
+# 2. 事前学習（--preset 05b、系列長 + バッチ カリキュラムで VRAM をほぼ一定に）
+#    block を伸ばす step で batch を下げる（vram_calibrate の最大 batch を先頭に）。
+uv run --no-group cpu --group cu124 suzume-dsa-train \
+    --preset 05b --sp-model tokenizer/sp.model \
+    --hf-dataset "range3/wikipedia-ja-20230101" \
+    --steps 20000 \
+    --block-size-schedule "0%:1024,50%:2048,80%:4096" \
+    --batch-size-schedule "0%:48,50%:24,80%:12" \
+    --optimizer muon --muon-lr 0.02 --lr 2e-4 \
+    --lr-schedule wsd --warmup 400 \
+    --out output_05b --device cuda
+#   → output_05b/model.pt（checkpoint_step*.pt も。切断時は --resume output_05b/checkpoint_step*.pt）
+#   Muon で nan が出たら --resume + --muon-lr 0.01。FIM は --fim 0.3、選択backprop は --select-topp 0.7
+
+# 3. SFT（cfg は checkpoint から継承＝0.5B のまま。寸法指定不要）
+uv run --no-group cpu --group cu124 suzume-dsa-sft \
+    --sp-model tokenizer/sp.model --init-from output_05b/model.pt \
+    --hf-sft-dataset "llm-jp/magpie-sft-v1.0" \
+    --steps 2000 --batch-size 8 --max-len 2048 --lr 1e-5 \
+    --out output_05b_sft --device cuda
+
+# 4. GGUF エクスポート（cfg は checkpoint から、語彙は SP から）
+uv run suzume-dsa-export \
+    --checkpoint output_05b_sft/sft_model.pt --sp-model tokenizer/sp.model \
+    --out suzume-05b.gguf
+
+# 5. 量子化して実行
+/workspace/llama.cpp/build/bin/llama-quantize suzume-05b.gguf suzume-05b-Q4_K_M.gguf Q4_K_M
+/workspace/llama.cpp/build/bin/llama-cli -m suzume-05b-Q4_K_M.gguf -p "すずめとは" -n 128
+```
+
+4B へ上げるときは 2 で `--preset 4b` にし、カリキュラムの batch を下げるだけ（3〜5 は不変）。
+
 ## tools/
 
 ```bash

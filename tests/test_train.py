@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from suzume_dsa import TINY  # noqa: E402
 from suzume_dsa.data import (  # noqa: E402
-    ByteTokenizer, PackedDataset, block_size_at, load_corpus_tokens,
-    parse_block_size_schedule,
+    ByteTokenizer, PackedDataset, batch_size_at, block_size_at,
+    load_corpus_tokens, parse_batch_size_schedule, parse_block_size_schedule,
 )
 from suzume_dsa.train import compute_loss, load_checkpoint, train  # noqa: E402
 from suzume_dsa.model import SuzumeGlmDsa  # noqa: E402
@@ -96,10 +96,38 @@ def test_curriculum_run():
     assert after < before
 
 
+def test_batch_size_schedule_parse():
+    # 絶対 step。batch は減る向き（block 伸長で VRAM 一定化）。
+    sched = parse_batch_size_schedule("0:16,100:8,200:4", max_steps=300)
+    assert sched == [(0, 16), (100, 8), (200, 4)]
+    assert batch_size_at(0, sched) == 16
+    assert batch_size_at(99, sched) == 16
+    assert batch_size_at(100, sched) == 8
+    assert batch_size_at(250, sched) == 4
+    # 増える向きも許可 + % 指定
+    pct = parse_batch_size_schedule("0%:4,50%:8", max_steps=100)
+    assert pct == [(0, 4), (50, 8)]
+    assert batch_size_at(60, pct) == 8
+
+
+def test_batch_curriculum_run():
+    """batch カリキュラム有効で 1-run 完走し、loss が下がる。"""
+    cfg = TINY
+    out = tempfile.mkdtemp()
+    model = train(cfg, CORPUS, steps=40, batch_size=8, block_size=64,
+                  batch_size_schedule="0:8,50%:4", lr=3e-3, out_dir=out,
+                  log_every=1000, ckpt_every=0, seed=0)
+    before = _avg_loss(SuzumeGlmDsa(cfg), cfg)
+    after = _avg_loss(model, cfg)
+    assert after < before
+
+
 if __name__ == "__main__":
     test_loss_decreases()
     test_mtp_loss_finite()
     test_checkpoint_resume()
     test_block_size_schedule_parse()
     test_curriculum_run()
+    test_batch_size_schedule_parse()
+    test_batch_curriculum_run()
     print("all train smoke tests passed")

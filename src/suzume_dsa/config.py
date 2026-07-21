@@ -73,6 +73,16 @@ class GlmDsaConfig:
 # total ~4.1B / active ~1.5B を狙う既定構成（tools/params.py と一致）
 SUZUME_4B = GlmDsaConfig()
 
+# 本番パイプライン検証・データ量に見合う小型トライ構成（total ~0.5B / active ~0.2B）。
+# 727M コーパスでも Chinchilla 比が桁で穏やかになり、pretrain→SFT→GGUF を安く一気通しできる。
+# 全く同じ glm-dsa アーキ（素 MLA + sigmoid MoE）で寸法・層・Expert 数だけを縮めたもの。
+SUZUME_05B = GlmDsaConfig(
+    n_embd=1024, n_layer=12, n_layer_dense_lead=1,
+    n_head=8, head_dim_nope=128, head_dim_rope=64, head_dim_v=128,
+    q_lora_rank=768, kv_lora_rank=384, n_ff=2816, n_ff_exp=640,
+    n_expert=16, n_expert_used=4, n_expert_shared=1,
+)
+
 # ユニットテスト・疎通用の極小構成
 TINY = GlmDsaConfig(
     vocab_size=256, n_embd=64, n_layer=3, n_layer_dense_lead=1,
@@ -81,4 +91,7 @@ TINY = GlmDsaConfig(
     n_expert=8, n_expert_used=2, n_expert_shared=1,
 )
 
-__all__ = ["GlmDsaConfig", "SUZUME_4B", "TINY"]
+# 名前で選べるプリセット（train.py の --preset で使用）
+PRESETS = {"4b": SUZUME_4B, "05b": SUZUME_05B, "tiny": TINY}
+
+__all__ = ["GlmDsaConfig", "SUZUME_4B", "SUZUME_05B", "TINY", "PRESETS"]

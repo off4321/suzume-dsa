@@ -136,9 +136,7 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
 
 def main() -> None:
     import argparse
-    from dataclasses import replace
 
-    from .config import SUZUME_4B
     from .tokenizer import SPTokenizer
 
     ap = argparse.ArgumentParser(description="suzume-dsa SFT")
@@ -160,7 +158,13 @@ def main() -> None:
     args = ap.parse_args()
 
     tok = SPTokenizer(args.sp_model)
-    cfg = replace(SUZUME_4B, vocab_size=tok.vocab_size)
+    # 事前学習 checkpoint に保存された cfg をそのまま使う（プリセット非依存で
+    # 0.5B でも 4B でも --init-from の寸法に一致させる。4B ハードコードは壊れる）。
+    ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
+    cfg = ckpt["cfg"]
+    assert cfg.vocab_size == tok.vocab_size, (
+        f"語彙不一致: checkpoint {cfg.vocab_size} vs sp-model {tok.vocab_size}"
+        "（事前学習と同じ SentencePiece を渡すこと）")
     convs = load_sft_conversations(args.hf_sft_dataset, max_samples=args.hf_max_samples)
     print(f"会話 {len(convs)} 件を読込")
     sft_train(cfg, convs, tok, steps=args.steps, batch_size=args.batch_size,
