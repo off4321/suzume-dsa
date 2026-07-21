@@ -49,6 +49,53 @@ uv run suzume-dsa-train --corpus mytext.txt --steps 200 \
 uv run python tests/test_train.py           # スモークテスト
 ```
 
+## 本番パイプライン（A: glm-dsa 密MLA+MoE）
+
+GPU では各コマンドに `--no-group cpu --group cu124` を付け、`--device cuda` を渡す。
+
+```bash
+# 0. セットアップ（GPU 版 torch）
+uv sync --no-group cpu --group cu124
+
+# 1. SentencePiece トークナイザ学習（日本語コーパス等から。vocab 32k）
+uv run tools/train_tokenizer.py \
+    --hf-dataset "range3/wikipedia-ja-20230101" --hf-max-samples 1000000 \
+    --vocab-size 32000 --out tokenizer/sp
+#   → tokenizer/sp.model
+
+# 2. 事前学習（SUZUME_4B = total 4B/active 1.4B、系列長カリキュラム + Muon + WSD）
+uv run --no-group cpu --group cu124 suzume-dsa-train \
+    --sp-model tokenizer/sp.model \
+    --hf-dataset "range3/wikipedia-ja-20230101" \
+    --steps 18000 --batch-size 16 \
+    --block-size-schedule "0%:1024,50%:2048,80%:4096" \
+    --optimizer muon --muon-lr 0.02 --lr 1.5e-4 \
+    --lr-schedule wsd --warmup 400 \
+    --out output --device cuda
+#   → output/model.pt（途中も checkpoint_step*.pt、--resume で再開可）
+#   FIM を混ぜるなら --fim 0.3、選択的backpropなら --select-topp 0.7
+
+# 3. SFT（事前学習 checkpoint から継続、assistant のみ教師化）
+uv run --no-group cpu --group cu124 suzume-dsa-sft \
+    --sp-model tokenizer/sp.model --init-from output/model.pt \
+    --hf-sft-dataset "llm-jp/magpie-sft-v1.0" \
+    --steps 2000 --batch-size 8 --max-len 2048 --lr 1e-5 \
+    --out output_sft --device cuda
+#   → output_sft/sft_model.pt
+
+# 4. GGUF エクスポート（実 SentencePiece 語彙を埋め込む）
+uv run suzume-dsa-export \
+    --checkpoint output_sft/sft_model.pt --sp-model tokenizer/sp.model \
+    --out suzume.gguf
+
+# 5. 量子化して実行（llama.cpp 側）
+/workspace/llama.cpp/build/bin/llama-quantize suzume.gguf suzume-Q4_K_M.gguf Q4_K_M
+/workspace/llama.cpp/build/bin/llama-cli -m suzume-Q4_K_M.gguf -p "すずめとは" -n 128
+```
+
+学習前のサイズ・VRAM 確認: `uv run tools/count_params.py` /
+`uv run --no-group cpu --group cu124 tools/vram_calibrate.py --block-size 4096 --device cuda`。
+
 ## tools/
 
 ```bash
