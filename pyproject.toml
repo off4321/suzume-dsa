@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 suzume-dsa-train = "suzume_dsa.train:main"
 suzume-dsa-sft = "suzume_dsa.sft:main"
+suzume-dsa-orpo = "suzume_dsa.orpo:main"
 suzume-dsa-export = "suzume_dsa.export_gguf:main"
 
 # --- PyTorch を CPU / CUDA で切り替える（suzume-muon と同じ方式）-----------
