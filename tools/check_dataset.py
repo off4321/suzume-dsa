@@ -20,6 +20,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from suzume_dsa.data import preview_hf_dataset  # noqa: E402
 
 
+def _preview_sft(spec: str, split, max_samples: int, n: int, hf_token) -> None:
+    """SFT spec を実際の loader で会話へ変換して先頭 n 件を表示（DSL/harmony も検証）。"""
+    from suzume_dsa.sft import load_sft_conversations
+
+    convs = load_sft_conversations(spec, split=split, max_samples=max_samples,
+                                   hf_token=hf_token, stream=True)
+    if not convs:
+        print("会話 0 件（messages/conversations 列なし、または DSL/harmony が空）。"
+              "spec の 4 番目フィールド（列名 / key=col,... / format=harmony）を確認。")
+        raise SystemExit(1)
+    print(f"会話 {len(convs)} 件（先頭 {min(n, len(convs))} 件を表示）:")
+    for conv in convs[:n]:
+        print("-" * 60)
+        for turn in conv:
+            role = turn.get("role") or turn.get("from") or "?"
+            content = turn.get("content") or turn.get("value") or ""
+            print(f"[{role}] {str(content)[:200]}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="HuggingFace データセットの下見")
     p.add_argument("spec", help='"path[:config][:split][:column]"')
@@ -29,7 +48,13 @@ def main() -> None:
     p.add_argument("--n", type=int, default=3, help="表示するサンプル数")
     p.add_argument("--hf-token", default=None, help="gated/private 用（無ければ環境変数 HF_TOKEN）")
     p.add_argument("--stream", action="store_true", help="streaming で先頭だけ読む（c4 等）")
+    p.add_argument("--sft", action="store_true",
+                   help="会話データとして下見（messages/conversations/列マッピング/harmony）")
     args = p.parse_args()
+
+    if args.sft:
+        _preview_sft(args.spec, args.split, args.max_samples, args.n, args.hf_token)
+        return
 
     info = preview_hf_dataset(
         args.spec, column=args.column, split=args.split, max_samples=args.max_samples,

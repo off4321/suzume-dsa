@@ -32,31 +32,40 @@ from .optim import build_optimizer, build_scheduler
 
 
 def compute_loss(logits: torch.Tensor, info: dict, targets: torch.Tensor,
-                 mtp_coef: float, select_topp: float = 1.0) -> tuple[torch.Tensor, dict]:
+                 mtp_coef: float, select_topp: float = 1.0,
+                 ignore_index: int = -100) -> tuple[torch.Tensor, dict]:
     """次トークン CE（メイン）+ MTP 補助（あれば）。
 
     logits: (B, T, V)、targets: (B, T)（= 入力を 1 つずらしたもの）。
     メインは位置 i で targets[i] を予測。MTP モジュール m(1始まり) は更に m 個先を予測し、
     logits 長 T-m を targets[:, m:] に合わせて損失を取る。
 
-    select_topp<1.0 で **選択的 backprop**: トークンごとの損失の上位 topp 割合だけを
+    ignore_index の位置は損失から除外する（SFT の assistant 以外マスクを同じ経路で扱う。
+    事前学習では -100 が現れないので従来と同一挙動）。MTP も同じ ignore で教師化する。
+
+    select_topp<1.0 で **選択的 backprop**: 有効トークンの損失上位 topp 割合だけを
     メイン損失に残す（易しいトークンに勾配を使わない。Selective Backprop 系）。
     """
     V = logits.size(-1)
-    tok_loss = F.cross_entropy(logits.reshape(-1, V), targets.reshape(-1), reduction="none")
-    if select_topp < 1.0:
-        k = max(1, int(select_topp * tok_loss.numel()))
-        keep = torch.topk(tok_loss, k).values
-        main = keep.mean()
+    flat_t = targets.reshape(-1)
+    tok_loss = F.cross_entropy(logits.reshape(-1, V), flat_t,
+                               reduction="none", ignore_index=ignore_index)
+    valid = tok_loss[flat_t != ignore_index]
+    if valid.numel() == 0:
+        main = logits.sum() * 0.0                  # 全マスク: 勾配ゼロの安全値
+    elif select_topp < 1.0:
+        k = max(1, int(select_topp * valid.numel()))
+        main = torch.topk(valid, k).values.mean()
     else:
-        main = tok_loss.mean()
+        main = valid.mean()
 
     mtp = torch.zeros((), device=logits.device)
     for m, ml in enumerate(info.get("mtp_logits", []), start=1):
         tgt = targets[:, m:]                       # m 個先へずらした教師
         pred = ml[:, : tgt.size(1)]                # 長さを教師に合わせて切る
-        if tgt.numel() > 0:
-            mtp = mtp + F.cross_entropy(pred.reshape(-1, V), tgt.reshape(-1))
+        if tgt.numel() > 0 and (tgt != ignore_index).any():
+            mtp = mtp + F.cross_entropy(pred.reshape(-1, V), tgt.reshape(-1),
+                                        ignore_index=ignore_index)
 
     loss = main + mtp_coef * mtp
     return loss, {"main": float(main.detach()), "mtp": float(mtp.detach())}
@@ -181,8 +190,9 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
 def main() -> None:
     ap = argparse.ArgumentParser(description="suzume-dsa pretrain")
     ap.add_argument("--corpus", default=None, help="テキストファイル / 文字列")
-    ap.add_argument("--hf-dataset", default=None,
-                    help='HFデータセット "path[:config][:split][:column]"（--sp-model と併用）')
+    ap.add_argument("--hf-dataset", nargs="+", default=None,
+                    help='HFデータセット "path[:config][:split][:column]"（--sp-model と併用）。'
+                         '複数指定で全部を連結学習。読めない spec は警告してスキップ')
     ap.add_argument("--hf-max-samples", type=int, default=None, help="HFから読む上限行数")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -249,8 +259,11 @@ def main() -> None:
     corpus = args.corpus
     if args.hf_dataset:
         assert tok is not None, "--hf-dataset は --sp-model が必要です"
-        from .data import load_hf_tokens
-        corpus = load_hf_tokens(args.hf_dataset, tok, max_samples=args.hf_max_samples)
+        import os as _os
+
+        from .data import load_hf_corpus
+        corpus = load_hf_corpus(args.hf_dataset, tok, max_samples=args.hf_max_samples,
+                                hf_token=_os.environ.get("HF_TOKEN"))
     assert corpus is not None, "--corpus か --hf-dataset のどちらかが必要です"
 
     train(cfg, corpus, steps=args.steps, batch_size=args.batch_size,

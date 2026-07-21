@@ -164,6 +164,36 @@ def load_hf_tokens(spec: str, tokenizer, *, column: str | None = None,
     return torch.tensor(ids, dtype=torch.long)
 
 
+def load_hf_corpus(specs, tokenizer, *, max_samples: int | None = None,
+                   hf_token: str | None = None, stream: bool = True) -> torch.Tensor:
+    """複数の HF spec を順に読み、トークン列を 1 本に連結する（各 spec に max_samples 適用）。
+
+    「data_check したデータセットを全部投入する」用。config 必須・カラム不明などで
+    読めない spec は警告してスキップし、残りで学習を続ける（1 件の失敗で全体を落とさない）。
+    単一 spec（str）も受け付ける。
+    """
+    if isinstance(specs, str):
+        specs = [specs]
+    chunks: list[torch.Tensor] = []
+    for spec in specs:
+        try:
+            toks = load_hf_tokens(spec, tokenizer, max_samples=max_samples,
+                                  hf_token=hf_token, stream=stream)
+        except Exception as e:  # noqa: BLE001 - 1 件ダメでも継続したい
+            print(f"[warn] スキップ（読込失敗）: {spec}  ({type(e).__name__}: {e})")
+            continue
+        if toks.numel() == 0:
+            print(f"[warn] スキップ（トークン0＝テキスト列不明？ :column 明示を検討）: {spec}")
+            continue
+        print(f"[data] {spec}: {toks.numel():,} tokens")
+        chunks.append(toks)
+    if not chunks:
+        raise SystemExit("有効な学習データが 0 件でした。spec / --column を確認してください。")
+    corpus = torch.cat(chunks)
+    print(f"[data] 合計 {len(chunks)} データセット / {corpus.numel():,} tokens")
+    return corpus
+
+
 class TokenWindows:
     """トークン列からランダムな長さ block のウィンドウをサンプルする。
 

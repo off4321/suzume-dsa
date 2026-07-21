@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from suzume_dsa import SUZUME_4B, GlmDsaConfig, SuzumeGlmDsa  # noqa: E402
+from suzume_dsa import PRESETS, SUZUME_4B, GlmDsaConfig, SuzumeGlmDsa  # noqa: E402
 
 # CLI で上書きできる config レバー（GlmDsaConfig のフィールド名）
 _LEVERS = [f.name for f in fields(GlmDsaConfig)]
@@ -28,6 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="glm-dsa モデルの total/active パラメータ数を見積もる（メモリ不要）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # 基準構成を名前で選ぶ（train.py と同じレバー）。個別 --n-* はこの上に上書き。
+    p.add_argument("--preset", default=None, choices=list(PRESETS),
+                   help="基準プリセット（未指定なら 4b）。個別フラグで上書き可")
     for name in _LEVERS:
         default = getattr(SUZUME_4B, name)
         if isinstance(default, bool):
@@ -43,9 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args) -> GlmDsaConfig:
+    base = PRESETS[args.preset] if getattr(args, "preset", None) else SUZUME_4B
     overrides = {name: getattr(args, name) for name in _LEVERS
                  if getattr(args, name, None) is not None}
-    return replace(SUZUME_4B, **overrides)
+    return replace(base, **overrides)
 
 
 def print_train_memory(total: int, bf16_weights: bool, optim8bit: bool) -> None:

@@ -20,31 +20,46 @@ from suzume_dsa.data import ByteTokenizer, load_hf_tokens, preview_hf_dataset  #
 from suzume_dsa.tokenizer import train_spm  # noqa: E402
 
 
-def _dump_hf_to_text(spec: str, out_txt: Path, max_samples: int, hf_token: str | None) -> None:
-    """HF データセットのテキスト列を 1 行ずつファイルへ書き出す（SP 学習の入力用）。"""
+def _dump_hf_to_text(specs, out_txt: Path, max_samples: int, hf_token: str | None) -> None:
+    """複数 HF データセットのテキスト列を 1 行ずつ 1 ファイルへ追記（SP 学習の入力用）。
+
+    読めない spec（config 必須・カラム不明など）は警告してスキップし、残りで続行する。
+    """
     from datasets import load_dataset
 
     from suzume_dsa.data import _guess_text_column, _parse_hf_spec
 
-    path, config, split, column = _parse_hf_spec(spec)
-    ds = load_dataset(path, config, split=split or "train", streaming=True, token=hf_token)
-    n = 0
+    if isinstance(specs, str):
+        specs = [specs]
+    total = 0
     with out_txt.open("w", encoding="utf-8") as f:
-        for i, row in enumerate(ds):
-            if i >= max_samples:
-                break
-            col = column or _guess_text_column(row.keys())
-            text = row.get(col)
-            if text:
-                f.write(str(text).replace("\n", " ") + "\n")
-                n += 1
-    print(f"HF → {out_txt}: {n} 行書き出し")
+        for spec in specs:
+            path, config, split, column = _parse_hf_spec(spec)
+            try:
+                ds = load_dataset(path, config, split=split or "train",
+                                  streaming=True, token=hf_token)
+                n = 0
+                for i, row in enumerate(ds):
+                    if i >= max_samples:
+                        break
+                    col = column or _guess_text_column(row.keys())
+                    text = row.get(col)
+                    if text:
+                        f.write(str(text).replace("\n", " ") + "\n")
+                        n += 1
+            except Exception as e:  # noqa: BLE001 - 1 件ダメでも継続
+                print(f"[warn] スキップ（読込失敗）: {spec}  ({type(e).__name__}: {e})")
+                continue
+            print(f"[tok] {spec}: {n} 行")
+            total += n
+    print(f"HF → {out_txt}: 合計 {total} 行書き出し")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="SentencePiece トークナイザ学習")
     ap.add_argument("--corpus", default=None, help="テキストファイル")
-    ap.add_argument("--hf-dataset", default=None, help='HF "path[:config][:split][:column]"')
+    ap.add_argument("--hf-dataset", nargs="+", default=None,
+                    help='HF "path[:config][:split][:column]"。複数指定で全部を語彙学習に使う')
     ap.add_argument("--hf-max-samples", type=int, default=1_000_000)
     ap.add_argument("--hf-token", default=None)
     ap.add_argument("--vocab-size", type=int, default=32000)
