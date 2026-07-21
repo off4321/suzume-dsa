@@ -85,13 +85,18 @@ def _parse_hf_spec(spec: str) -> tuple[str, str | None, str | None, str | None]:
     return path, config, split, column
 
 
-def _guess_text_column(features) -> str | None:
+def _guess_text_column(sample: dict) -> str | None:
+    """サンプル行（1件の dict）からテキスト列名を推測する。
+
+    ストリーム/非ストリームどちらも 1 行分の dict を受け取れるよう、features の
+    dtype ではなく実際の値の型で判定する。
+    """
     for cand in ("text", "content", "body", "document", "raw", "ja", "japanese"):
-        if cand in features:
+        if cand in sample:
             return cand
     # 最初の文字列カラムにフォールバック
-    for name, feat in features.items():
-        if getattr(feat, "dtype", None) == "string":
+    for name, value in sample.items():
+        if isinstance(value, str):
             return name
     return None
 
@@ -128,7 +133,7 @@ def preview_hf_dataset(spec: str, *, column: str | None = None, split: str | Non
     if not rows:
         return {"ok": True, "usable": False}
 
-    col = column or _guess_text_column(rows[0].keys() if stream else ds.features)
+    col = column or _guess_text_column(rows[0])
     if verbose:
         print(f"path={path} config={config} split={split} → {len(rows)} 行読込")
         print(f"カラム: {list(rows[0].keys())}  / テキスト列: {col}")
