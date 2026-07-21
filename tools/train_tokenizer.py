@@ -27,7 +27,7 @@ def _dump_hf_to_text(specs, out_txt: Path, max_samples: int, hf_token: str | Non
     """
     from datasets import load_dataset
 
-    from suzume_dsa.data import _guess_text_column, _parse_hf_spec
+    from suzume_dsa.data import _cell_to_text, _guess_text_column, _parse_hf_spec
 
     if isinstance(specs, str):
         specs = [specs]
@@ -42,10 +42,10 @@ def _dump_hf_to_text(specs, out_txt: Path, max_samples: int, hf_token: str | Non
                 for i, row in enumerate(ds):
                     if i >= max_samples:
                         break
-                    col = column or _guess_text_column(row.keys())
-                    text = row.get(col)
+                    col = column or _guess_text_column(row)
+                    text = _cell_to_text(row.get(col)) if col else ""
                     if text:
-                        f.write(str(text).replace("\n", " ") + "\n")
+                        f.write(text.replace("\n", " ") + "\n")
                         n += 1
             except Exception as e:  # noqa: BLE001 - 1 件ダメでも継続
                 print(f"[warn] スキップ（読込失敗）: {spec}  ({type(e).__name__}: {e})")

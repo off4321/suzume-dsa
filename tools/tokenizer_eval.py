@@ -77,7 +77,7 @@ def _gather_text(corpus: str | None, hf_dataset: str | None,
     assert hf_dataset, "--corpus か --hf-dataset のどちらかが必要です"
     from datasets import load_dataset
 
-    from suzume_dsa.data import _guess_text_column, _parse_hf_spec
+    from suzume_dsa.data import _cell_to_text, _guess_text_column, _parse_hf_spec
 
     path, config, split, column = _parse_hf_spec(hf_dataset)
     ds = load_dataset(path, config, split=split or "train", streaming=True, token=hf_token)
@@ -86,12 +86,11 @@ def _gather_text(corpus: str | None, hf_dataset: str | None,
     for i, row in enumerate(ds):
         if i >= max_samples or total >= max_chars:
             break
-        col = column or _guess_text_column(row.keys())
-        text = row.get(col)
+        col = column or _guess_text_column(row)
+        text = _cell_to_text(row.get(col)) if col else ""
         if text:
-            s = str(text)
-            parts.append(s)
-            total += len(s)
+            parts.append(text)
+            total += len(text)
     return "\n".join(parts)[:max_chars]
 
 
