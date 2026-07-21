@@ -19,8 +19,10 @@ IGNORE = -100
 # 別カラムに分かれた instruct データを 1 会話（user→assistant）へ組み立てるため。
 _SYSTEM_KEYS = {"system"}
 _USER_KEYS = {"instruction", "input", "question", "prompt", "problem", "user"}
-_REASON_KEYS = {"reasoning", "thinking", "thought", "cot", "rationale"}
-_ASST_KEYS = {"output", "answer", "response", "completion", "assistant"}
+_REASON_KEYS = {"reasoning", "thinking", "thought", "cot", "rationale",
+                "complex_cot", "reason", "reasoning_content"}
+_ASST_KEYS = {"output", "answer", "response", "completion", "assistant",
+              "final_output"}
 
 
 def _wrap_reasoning(reason: str, answer: str) -> str:
@@ -89,6 +91,68 @@ def parse_harmony(text: str) -> list[dict]:
     return turns
 
 
+def _content_to_text(content) -> str:
+    """content（文字列 / パーツ list / dict）を平坦なテキストへ。
+
+    OpenAI 系の構造化メッセージは content が [{"type":"text","text":...}] の
+    ような list になる。text/value を持つパーツだけを拾い、持たないメタ的な
+    パーツ（system の model_identity など）は無視する。
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("text")
+                if t is None:
+                    t = p.get("value")
+                if t:
+                    out.append(str(t))
+            elif isinstance(p, str):
+                out.append(p)
+        return "\n".join(out)
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("value") or "")
+    return str(content)
+
+
+def parse_structured_messages(messages: list) -> list[dict]:
+    """list[{role, content, channel?}] を [{"role","content"}] へ正規化する。
+
+    content は文字列でも [{"type":"text","text":...}] のパーツ list でも可。
+    from/value 形式（ShareGPT）にも対応。assistant の analysis/reasoning
+    チャネルは直後の final ターンと統合し <think> で包む（channel 付き構造化
+    メッセージ = llm-jp-4-thinking などに対応）。text が空のターンは捨てる。
+    """
+    turns: list[dict] = []
+    pending_think = None
+    for m in messages:
+        if not isinstance(m, dict):
+            if isinstance(m, str) and m.strip():
+                turns.append({"role": "user", "content": m})
+            continue
+        role = m.get("role") or m.get("from") or "user"
+        role = {"human": "user", "gpt": "assistant"}.get(role, role)
+        raw = m.get("content")
+        if raw is None:
+            raw = m.get("value")
+        content = _content_to_text(raw)
+        channel = str(m.get("channel") or "").strip().lower()
+        if role == "assistant" and channel in ("analysis", "reasoning", "think"):
+            pending_think = content
+            continue
+        if role == "assistant":
+            content = _wrap_reasoning(pending_think or "", content)
+            pending_think = None
+        if not content.strip():
+            continue
+        turns.append({"role": role, "content": content})
+    return turns
+
+
 def build_chatml_template(default_system: str) -> str:
     """ChatML の Jinja チャットテンプレート（GGUF の tokenizer.chat_template 用）。
 
@@ -141,4 +205,5 @@ def build_sft_example(messages: list[dict], tokenizer) -> tuple[list[int], list[
 
 
 __all__ = ["build_sft_example", "normalize_turn", "conversation_from_columns",
-           "parse_harmony", "build_chatml_template", "IM_START", "IM_END", "IGNORE"]
+           "parse_harmony", "parse_structured_messages", "build_chatml_template",
+           "IM_START", "IM_END", "IGNORE"]

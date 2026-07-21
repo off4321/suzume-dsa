@@ -85,20 +85,81 @@ def _parse_hf_spec(spec: str) -> tuple[str, str | None, str | None, str | None]:
     return path, config, split, column
 
 
-def _guess_text_column(sample: dict) -> str | None:
-    """サンプル行（1件の dict）からテキスト列名を推測する。
+# 明示的なテキスト列（優先的に採用）
+_TEXT_CANDIDATES = ("text", "content", "body", "document", "raw", "ja", "japanese",
+                    "markdown", "story")
+# 会話列（list）。テキスト列が無ければ平坦化して本文として使う
+_CONV_CANDIDATES = ("conversations", "messages", "conversation", "dialog",
+                    "dialogue", "turns")
+# 本文でないメタ列（フォールバックの「最長文字列列」選びから除外する）
+_META_COLS = {
+    "id", "uid", "pageid", "revid", "sha", "source", "source_dataset", "category",
+    "subcategory", "task", "url", "task_url", "language_url", "timestamp", "date",
+    "date_created", "date_modified", "dump", "score", "split", "language",
+    "language_score", "language_script", "region", "script", "lang", "resource",
+    "session", "func_name", "top_langs", "file_path", "minhash_cluster_size",
+    "repo", "path", "language_name", "is_disambiguation_page", "is_sexual_page",
+    "is_violent_page", "templates",
+}
 
-    ストリーム/非ストリームどちらも 1 行分の dict を受け取れるよう、features の
-    dtype ではなく実際の値の型で判定する。
+
+def _content_parts_to_text(content) -> str:
+    """会話ターンの content（文字列 / パーツ list / dict）を平坦なテキストへ。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("text") or p.get("value")
+                if t:
+                    out.append(str(t))
+            elif isinstance(p, str):
+                out.append(p)
+        return " ".join(out)
+    if isinstance(content, dict):
+        return str(content.get("text") or content.get("value") or "")
+    return ""
+
+
+def _cell_to_text(value) -> str:
+    """セルの値をテキスト化する。文字列はそのまま、会話 list は各ターンを連結。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for turn in value:
+            if isinstance(turn, dict):
+                c = turn.get("content")
+                if c is None:
+                    c = turn.get("value") or turn.get("text") or ""
+                parts.append(_content_parts_to_text(c))
+            elif isinstance(turn, str):
+                parts.append(turn)
+        return "\n".join(p for p in parts if p)
+    return ""
+
+
+def _guess_text_column(sample: dict) -> str | None:
+    """サンプル行（1件の dict）から本文列名を推測する。
+
+    優先順: 明示テキスト列 → 会話列(list, 後段で平坦化) → メタ列以外で最長の文字列列。
+    id/source/category のようなメタ文字列列を誤って選ばないようにする。
     """
-    for cand in ("text", "content", "body", "document", "raw", "ja", "japanese"):
-        if cand in sample:
+    for cand in _TEXT_CANDIDATES:
+        if isinstance(sample.get(cand), str):
             return cand
-    # 最初の文字列カラムにフォールバック
+    for cand in _CONV_CANDIDATES:
+        if isinstance(sample.get(cand), list) and sample[cand]:
+            return cand
+    # メタ列を避けつつ、サンプル値が最も長い文字列列を選ぶ
+    best, best_len = None, 0
     for name, value in sample.items():
-        if isinstance(value, str):
-            return name
-    return None
+        if str(name).lower() in _META_COLS or not isinstance(value, str):
+            continue
+        if len(value) > best_len:
+            best, best_len = name, len(value)
+    return best
 
 
 def preview_hf_dataset(spec: str, *, column: str | None = None, split: str | None = None,
@@ -134,13 +195,14 @@ def preview_hf_dataset(spec: str, *, column: str | None = None, split: str | Non
         return {"ok": True, "usable": False}
 
     col = column or _guess_text_column(rows[0])
+    usable = col is not None and any(_cell_to_text(r.get(col)).strip() for r in rows[:n])
     if verbose:
         print(f"path={path} config={config} split={split} → {len(rows)} 行読込")
         print(f"カラム: {list(rows[0].keys())}  / テキスト列: {col}")
         for r in rows[:n]:
-            sample = str(r.get(col, r))[:200].replace("\n", " ")
+            sample = _cell_to_text(r.get(col))[:200].replace("\n", " ")
             print(f"  - {sample}")
-    return {"ok": True, "usable": col is not None, "column": col, "rows": len(rows)}
+    return {"ok": True, "usable": usable, "column": col, "rows": len(rows)}
 
 
 def load_hf_tokens(spec: str, tokenizer, *, column: str | None = None,
@@ -161,8 +223,8 @@ def load_hf_tokens(spec: str, tokenizer, *, column: str | None = None,
     for i, row in enumerate(ds):
         if max_samples is not None and i >= max_samples:
             break
-        col = column or _guess_text_column(row.keys())
-        text = row.get(col)
+        col = column or _guess_text_column(row)
+        text = _cell_to_text(row.get(col)) if col else ""
         if text:
             ids.extend(tokenizer.encode(text))
             ids.append(tokenizer.encode("\n")[0] if tokenizer.encode("\n") else 10)

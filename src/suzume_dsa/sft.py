@@ -154,21 +154,88 @@ def _parse_sft_field(field: str | None):
     return "mapping", pairs
 
 
-def _row_to_turns(row: dict, mode: str, arg, *, normalize):
-    from .chat import conversation_from_columns, parse_harmony
+_CONV_KEYS = ("messages", "conversations", "conversation", "dialog", "dialogue", "turns")
+
+
+def _value_to_turns(value) -> list[dict]:
+    """会話列の値を [{"role","content"}] へ。
+
+    - list                    → 構造化メッセージ（ShareGPT / content パーツ / channel）
+    - JSON 文字列（list/dict） → パースして構造化メッセージ扱い
+    - harmony トークン文字列   → parse_harmony（<|start|>…<|message|>…）
+    """
+    from .chat import parse_harmony, parse_structured_messages
+
+    if not value:
+        return []
+    if isinstance(value, str):
+        s = value.strip()
+        if s[:1] in "[{":                       # JSON エンコードされた会話
+            import json
+            try:
+                loaded = json.loads(s)
+            except ValueError:
+                loaded = None
+            if isinstance(loaded, list):
+                return parse_structured_messages(loaded)
+            if isinstance(loaded, dict):
+                inner = loaded.get("messages") or loaded.get("conversations")
+                if isinstance(inner, list):
+                    return parse_structured_messages(inner)
+        return parse_harmony(s)                  # <|start|> トークン形式
+    if isinstance(value, list):
+        return parse_structured_messages(value)
+    return []
+
+
+def _auto_column_mapping(row: dict) -> dict | None:
+    """messages/conversations が無い行から instruction/output スタイルを自動検出。
+
+    列名を _USER_KEYS / _ASST_KEYS / _REASON_KEYS / _SYSTEM_KEYS（大小無視）と
+    照合し、user と assistant 相当が揃ったときだけ列マッピングを返す。
+    Tengentoppa（instruction/reasoning/final_output）や Medical-o1
+    （Question/Complex_CoT/Response）を明示 DSL なしで会話化できる。
+    """
+    from .chat import _ASST_KEYS, _REASON_KEYS, _SYSTEM_KEYS, _USER_KEYS
+
+    mapping: dict[str, str] = {}
+    for col in row:
+        lk = str(col).strip().lower()
+        if lk in _SYSTEM_KEYS:
+            mapping.setdefault("system", col)
+        elif lk in _USER_KEYS:
+            mapping.setdefault("instruction", col)
+        elif lk in _REASON_KEYS:
+            mapping.setdefault("reasoning", col)
+        elif lk in _ASST_KEYS:
+            mapping.setdefault("output", col)
+    if "instruction" in mapping and "output" in mapping:
+        return mapping
+    return None
+
+
+def _row_to_turns(row: dict, mode: str, arg) -> list[dict]:
+    from .chat import conversation_from_columns
 
     if mode == "mapping":
         return conversation_from_columns(row, arg)
+    if mode == "column":
+        return _value_to_turns(row.get(arg))
     if mode == "harmony":
         raw = (row.get("messages") or row.get("conversations")
                or row.get("text") or row.get("output") or "")
-        if isinstance(raw, str):
-            return parse_harmony(raw)
-        return [normalize(t) for t in raw] if raw else []
-    if mode == "column":
-        turns = row.get(arg)
-        return list(turns) if turns else []
-    return list(row.get("messages") or row.get("conversations") or [])
+        return _value_to_turns(raw)
+    # auto: 会話列 → instruction/output 自動マッピングの順で試す
+    for key in _CONV_KEYS:
+        val = row.get(key)
+        if val:
+            turns = _value_to_turns(val)
+            if turns:
+                return turns
+    mapping = _auto_column_mapping(row)
+    if mapping:
+        return conversation_from_columns(row, mapping)
+    return []
 
 
 def load_jsonl_conversations(path: str) -> list[list[dict]]:
@@ -202,7 +269,6 @@ def load_sft_conversations(spec: str, *, split: str | None = None,
     """
     from datasets import load_dataset
 
-    from .chat import normalize_turn
     from .data import _parse_hf_spec
 
     path, config, spec_split, field = _parse_hf_spec(spec)
@@ -213,7 +279,7 @@ def load_sft_conversations(spec: str, *, split: str | None = None,
     for i, row in enumerate(ds):
         if max_samples is not None and i >= max_samples:
             break
-        turns = _row_to_turns(row, mode, arg, normalize=normalize_turn)
+        turns = _row_to_turns(row, mode, arg)
         if turns:
             convs.append(list(turns))
     return convs

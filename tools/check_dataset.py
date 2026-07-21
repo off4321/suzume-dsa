@@ -13,6 +13,7 @@ spec 書式: "path[:config][:split][:column]"（path は namespace/name）
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from suzume_dsa.data import preview_hf_dataset  # noqa: E402
 
 
-def _preview_sft(spec: str, split, max_samples: int, n: int, hf_token) -> None:
+def _preview_sft(spec: str, split, max_samples: int, n: int, hf_token) -> int:
     """SFT spec を実際の loader で会話へ変換して先頭 n 件を表示（DSL/harmony も検証）。"""
     from suzume_dsa.sft import load_sft_conversations
 
@@ -29,7 +30,7 @@ def _preview_sft(spec: str, split, max_samples: int, n: int, hf_token) -> None:
     if not convs:
         print("会話 0 件（messages/conversations 列なし、または DSL/harmony が空）。"
               "spec の 4 番目フィールド（列名 / key=col,... / format=harmony）を確認。")
-        raise SystemExit(1)
+        return 1
     print(f"会話 {len(convs)} 件（先頭 {min(n, len(convs))} 件を表示）:")
     for conv in convs[:n]:
         print("-" * 60)
@@ -37,9 +38,10 @@ def _preview_sft(spec: str, split, max_samples: int, n: int, hf_token) -> None:
             role = turn.get("role") or turn.get("from") or "?"
             content = turn.get("content") or turn.get("value") or ""
             print(f"[{role}] {str(content)[:200]}")
+    return 0
 
 
-def main() -> None:
+def main() -> int:
     p = argparse.ArgumentParser(description="HuggingFace データセットの下見")
     p.add_argument("spec", help='"path[:config][:split][:column]"')
     p.add_argument("--column", default=None, help="テキストカラム名（省略時は自動判定）")
@@ -53,8 +55,7 @@ def main() -> None:
     args = p.parse_args()
 
     if args.sft:
-        _preview_sft(args.spec, args.split, args.max_samples, args.n, args.hf_token)
-        return
+        return _preview_sft(args.spec, args.split, args.max_samples, args.n, args.hf_token)
 
     info = preview_hf_dataset(
         args.spec, column=args.column, split=args.split, max_samples=args.max_samples,
@@ -62,11 +63,18 @@ def main() -> None:
     if not info.get("ok"):
         print("ヒント: path は 'namespace/name' か / config 名が要らないか / "
               "gated なら --hf-token（or 環境変数 HF_TOKEN）を確認。")
-        raise SystemExit(1)
+        return 1
     if not info.get("usable"):
         print("テキストカラムを特定できませんでした。--column で明示してください。")
-        raise SystemExit(1)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # HF の streaming 後片付けスレッドが interpreter finalize 時に
+    # "Fatal Python error: PyGILState_Release" で落ちるのを避けるため、
+    # Python のファイナライザを走らせずに即終了する（出力は上で flush 済み）。
+    os._exit(code)
