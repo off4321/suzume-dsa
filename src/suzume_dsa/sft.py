@@ -207,6 +207,7 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
               select_topp: float = 1.0, mup: bool = False, mup_base_width: int = 256,
               precision: str = "bf16", grad_accum: int = 1,
               pack: bool = True, neftune_alpha: float = 0.0,
+              z_loss_coef: float = 0.0, router_z_coef: float = 0.0,
               log_every: int = 10, ckpt_every: int = 0,
               device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     """SFT ループ。事前学習と同じ効率化を共有する: MTP 補助損失（cfg.mtp_depth>0 なら
@@ -252,7 +253,9 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
             with torch.autocast(device_type=dev_type, dtype=amp_dtype, enabled=use_amp):
                 logits, info = model(x, attn_mask=attn_mask)
                 loss, parts = compute_loss(logits, info, targets, cfg.mtp_loss_coef,
-                                           select_topp=select_topp, ignore_index=IGNORE)
+                                           select_topp=select_topp, ignore_index=IGNORE,
+                                           z_loss_coef=z_loss_coef,
+                                           router_z_coef=router_z_coef)
             scaler.scale(loss / grad_accum).backward()
             main_acc += parts["main"] / grad_accum
             mtp_acc += parts["mtp"] / grad_accum
@@ -316,6 +319,10 @@ def main() -> None:
                     help="シーケンスパッキング（境界マスク付き）。--no-pack で無効")
     ap.add_argument("--neftune", type=float, default=0.0, dest="neftune_alpha",
                     help="NEFTune 埋め込みノイズの強さ（例 5.0）。0 で無効")
+    ap.add_argument("--z-loss", type=float, default=0.0, dest="z_loss_coef",
+                    help="出力 z-loss 係数（例 1e-4）")
+    ap.add_argument("--router-z", type=float, default=0.0, dest="router_z_coef",
+                    help="MoE ルーター z-loss 係数（例 1e-3）")
     ap.add_argument("--out", default="output_sft")
     ap.add_argument("--ckpt-every", type=int, default=500)
     ap.add_argument("--device", default="cpu")
@@ -355,6 +362,7 @@ def main() -> None:
               select_topp=args.select_topp, mup=args.mup, mup_base_width=args.mup_base_width,
               precision=args.precision, grad_accum=args.grad_accum,
               pack=args.pack, neftune_alpha=args.neftune_alpha,
+              z_loss_coef=args.z_loss_coef, router_z_coef=args.router_z_coef,
               ckpt_every=args.ckpt_every, device=args.device)
 
 

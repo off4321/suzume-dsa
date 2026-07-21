@@ -43,6 +43,7 @@ class SharedExpertMoE(nn.Module):
         self.register_buffer("exp_probs_b", torch.zeros(self.num_experts))
         # 直近ステップの Expert 選択回数を溜めて commit 時に bias 更新へ使う
         self.register_buffer("_load", torch.zeros(self.num_experts), persistent=False)
+        self._z_loss = None      # 直近 forward の router z-loss（学習時のみ設定）
 
         # ルーティング Expert（バッチ化した重み。expert 次元を先頭に持つ）
         self.w_gate = nn.Parameter(torch.empty(self.num_experts, self.ff, cfg.n_embd))
@@ -59,7 +60,11 @@ class SharedExpertMoE(nn.Module):
         flat = x.reshape(-1, D)                          # (N, D)
         N = flat.size(0)
 
-        scores = torch.sigmoid(self.gate_inp(flat))      # (N, E) 合成重み用（bias 無し）
+        gate_logits = self.gate_inp(flat)                # (N, E) 素のルーターロジット
+        # router z-loss（安定化）用: ロジットの膨張を罰する項をこの forward 分だけ保持。
+        # 学習ループが有効時のみ回収（既定は係数0で無視）。export・推論では None のまま。
+        self._z_loss = (torch.logsumexp(gate_logits, dim=-1) ** 2).mean() if self.training else None
+        scores = torch.sigmoid(gate_logits)              # (N, E) 合成重み用（bias 無し）
         routing = scores + self.exp_probs_b              # 選択用（aux-free bias 込み）
         topk_idx = routing.topk(self.k, dim=-1).indices  # (N, k)
 

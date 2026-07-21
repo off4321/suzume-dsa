@@ -70,6 +70,11 @@ class SuzumeGlmDsa(nn.Module):
             logits: (B, T, vocab_size)
             info:   {"mtp_logits": [ (B, T-k, V), ... ]}（学習時 MTP 有効時のみ）
         """
+        # router z-loss を今 forward 分だけ集めるため、全 MoE の保持値をリセット
+        moes = [m for m in self.modules() if isinstance(m, SharedExpertMoE)]
+        for m in moes:
+            m._z_loss = None
+
         x = self.token_embd(input_ids)
         if self.training and self.neftune_alpha > 0.0:      # NEFTune 埋め込みノイズ
             d = x.size(-1) * x.size(1)
@@ -93,6 +98,11 @@ class SuzumeGlmDsa(nn.Module):
                 h_k = mod(hk_in, e, attn_mask=m)
                 mtp_logits.append(self._logits(self.output_norm(h_k)))
             info["mtp_logits"] = mtp_logits
+
+        if self.training:                              # 全 MoE 層の router z-loss を平均
+            zs = [m._z_loss for m in moes if m._z_loss is not None]
+            if zs:
+                info["router_z"] = torch.stack(zs).mean()
         return logits, info
 
     def commit_router_bias_updates(self) -> None:

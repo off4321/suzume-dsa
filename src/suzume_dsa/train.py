@@ -33,7 +33,8 @@ from .optim import build_optimizer, build_scheduler
 
 def compute_loss(logits: torch.Tensor, info: dict, targets: torch.Tensor,
                  mtp_coef: float, select_topp: float = 1.0,
-                 ignore_index: int = -100) -> tuple[torch.Tensor, dict]:
+                 ignore_index: int = -100, z_loss_coef: float = 0.0,
+                 router_z_coef: float = 0.0) -> tuple[torch.Tensor, dict]:
     """次トークン CE（メイン）+ MTP 補助（あれば）。
 
     logits: (B, T, V)、targets: (B, T)（= 入力を 1 つずらしたもの）。
@@ -67,8 +68,19 @@ def compute_loss(logits: torch.Tensor, info: dict, targets: torch.Tensor,
             mtp = mtp + F.cross_entropy(pred.reshape(-1, V), tgt.reshape(-1),
                                         ignore_index=ignore_index)
 
-    loss = main + mtp_coef * mtp
-    return loss, {"main": float(main.detach()), "mtp": float(mtp.detach())}
+    # z-loss（安定化）: logsumexp の膨張を罰し、logits を小さく保つ＝高い LR を踏める。
+    z = torch.zeros((), device=logits.device)
+    if z_loss_coef > 0.0:
+        lse = torch.logsumexp(logits.reshape(-1, V), dim=-1)[flat_t != ignore_index]
+        if lse.numel() > 0:
+            z = (lse ** 2).mean()
+    router_z = info.get("router_z")
+    if router_z is None or router_z_coef <= 0.0:
+        router_z = torch.zeros((), device=logits.device)
+
+    loss = main + mtp_coef * mtp + z_loss_coef * z + router_z_coef * router_z
+    return loss, {"main": float(main.detach()), "mtp": float(mtp.detach()),
+                  "zloss": float(z.detach()), "router_z": float(router_z.detach())}
 
 
 def load_init_weights(model: SuzumeGlmDsa, path: str) -> None:
@@ -131,6 +143,7 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
           fim_rate: float = 0.0, fim_spm_prob: float = 0.5, select_topp: float = 1.0,
           weight_decay: float = 0.1, grad_clip: float = 1.0,
           precision: str = "bf16", grad_accum: int = 1,
+          z_loss_coef: float = 0.0, router_z_coef: float = 0.0,
           log_every: int = 10, ckpt_every: int = 200,
           device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     torch.manual_seed(seed)
@@ -179,7 +192,9 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
             x, y = x.to(device), y.to(device)
             with torch.autocast(device_type=dev_type, dtype=amp_dtype, enabled=use_amp):
                 logits, info = model(x)
-                loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef, select_topp)
+                loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef, select_topp,
+                                           z_loss_coef=z_loss_coef,
+                                           router_z_coef=router_z_coef)
             scaler.scale(loss / grad_accum).backward()
             main_acc += parts["main"] / grad_accum
             mtp_acc += parts["mtp"] / grad_accum
@@ -248,6 +263,10 @@ def main() -> None:
                     help="混合精度（CUDA のみ有効。bf16 推奨で約2倍速・メモリ半減）")
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="勾配累積のマイクロバッチ数（実効 batch = batch×accum）")
+    ap.add_argument("--z-loss", type=float, default=0.0, dest="z_loss_coef",
+                    help="出力 z-loss 係数（例 1e-4）。logits の膨張を抑え安定化")
+    ap.add_argument("--router-z", type=float, default=0.0, dest="router_z_coef",
+                    help="MoE ルーター z-loss 係数（例 1e-3）。ルーティング安定化")
     ap.add_argument("--sp-model", default=None, help="SentencePiece .model（本番語彙）")
     # モデル寸法: プリセット選択 + 個別レバー上書き（GlmDsaConfig の全フィールド）
     ap.add_argument("--preset", default=None, choices=["4b", "05b", "tiny"],
@@ -304,7 +323,8 @@ def main() -> None:
           wsd_decay_frac=args.wsd_decay_frac, mup=args.mup,
           mup_base_width=args.mup_base_width, fim_rate=args.fim_rate,
           select_topp=args.select_topp, precision=args.precision,
-          grad_accum=args.grad_accum, device=args.device)
+          grad_accum=args.grad_accum, z_loss_coef=args.z_loss_coef,
+          router_z_coef=args.router_z_coef, device=args.device)
 
 
 if __name__ == "__main__":

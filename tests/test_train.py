@@ -133,6 +133,26 @@ def test_grad_accum_run():
     assert after < before
 
 
+def test_z_loss_and_router_z():
+    """出力 z-loss と MoE ルーター z-loss が有限に出て、loss に上乗せされる。"""
+    cfg = replace(TINY, mtp_depth=1)
+    model = SuzumeGlmDsa(cfg).train()
+    tok = ByteTokenizer()
+    data = PackedDataset(load_corpus_tokens(CORPUS, tok), block_size=64)
+    x, y = next(data.batches(4))
+    logits, info = model(x)
+    assert "router_z" in info                       # MoE 層があるので router_z が出る
+    base, _ = compute_loss(logits, info, y, cfg.mtp_loss_coef)
+    withz, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef,
+                                z_loss_coef=1e-3, router_z_coef=1e-2)
+    assert parts["zloss"] > 0 and parts["router_z"] > 0
+    assert float(withz) > float(base)               # z 項の分だけ増える
+    # 学習ループでも有効化して完走
+    out = tempfile.mkdtemp()
+    train(cfg, CORPUS, steps=20, batch_size=8, block_size=64, lr=3e-3, out_dir=out,
+          z_loss_coef=1e-4, router_z_coef=1e-3, log_every=1000, ckpt_every=0, seed=0)
+
+
 def test_make_amp_cpu_is_fp32():
     """CPU では autocast を無効化（fp32・決定的）、scaler も無効であること。"""
     from suzume_dsa.train import make_amp
@@ -149,5 +169,6 @@ if __name__ == "__main__":
     test_batch_size_schedule_parse()
     test_batch_curriculum_run()
     test_grad_accum_run()
+    test_z_loss_and_router_z()
     test_make_amp_cpu_is_fp32()
     print("all train smoke tests passed")
