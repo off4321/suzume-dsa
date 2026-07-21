@@ -55,6 +55,77 @@ class SFTDataset:
                 yield torch.tensor(xb), torch.tensor(yb)
 
 
+PAD_SEG = -1   # パッキングのパディング位置を表すセグメントID（実データと衝突しない）
+
+
+class PackedSFTDataset:
+    """複数会話を max_len に貪欲に詰めてパディング無駄を消す（スループット向上）。
+
+    各系列にセグメントID列を持たせ、後段の segment_causal_mask で会話境界を跨ぐ
+    attention を止める（パッキングによる会話間の混線を防ぐ＝品質を落とさない）。
+    """
+
+    def __init__(self, conversations: list[list[dict]], tokenizer, max_len: int,
+                 pad_id: int = 0):
+        exs = []
+        for conv in conversations:
+            ids, labels = build_sft_example(conv, tokenizer)
+            ids, labels = ids[:max_len], labels[:max_len]
+            if any(l != IGNORE for l in labels):
+                exs.append((ids, labels))
+        self.seqs: list[tuple[list[int], list[int], list[int]]] = []
+        cx: list[int] = []
+        cy: list[int] = []
+        cs: list[int] = []
+        seg = 0
+
+        def flush():
+            nonlocal cx, cy, cs, seg
+            if not cx:
+                return
+            pad = max_len - len(cx)
+            self.seqs.append((cx + [pad_id] * pad, cy + [IGNORE] * pad,
+                              cs + [PAD_SEG] * pad))
+            cx, cy, cs, seg = [], [], [], 0
+
+        for ids, labels in exs:
+            if cx and len(cx) + len(ids) > max_len:
+                flush()
+            cx += ids
+            cy += labels
+            cs += [seg] * len(ids)
+            seg += 1
+        flush()
+        assert self.seqs, "パッキング後のシーケンスが空です"
+        self.max_len = max_len
+
+    def __len__(self) -> int:
+        return len(self.seqs)
+
+    def batches(self, batch_size: int, generator: torch.Generator | None = None):
+        bs = min(batch_size, len(self))                 # 会話が少なくても 1 バッチは出す
+        while True:
+            order = torch.randperm(len(self), generator=generator)
+            for i in range(0, len(self) - bs + 1, bs):
+                idx = order[i : i + bs]
+                xb = torch.tensor([self.seqs[j][0] for j in idx])
+                yb = torch.tensor([self.seqs[j][1] for j in idx])
+                sb = torch.tensor([self.seqs[j][2] for j in idx])
+                yield xb, yb, sb
+
+
+def segment_causal_mask(seg: torch.Tensor) -> torch.Tensor:
+    """seg: (B,T) → (B,1,T,T) bool（True=attend）。causal かつ同一セグメントのみ許可。
+
+    パディング(PAD_SEG)同士は許可するので全マスク行にならず（SDPA の nan 回避）、
+    実トークンは PAD_SEG と別IDなので pad を参照しない。
+    """
+    _, T = seg.shape
+    same = seg[:, :, None] == seg[:, None, :]           # (B,T,T)
+    causal = torch.tril(torch.ones(T, T, dtype=torch.bool, device=seg.device))
+    return (same & causal).unsqueeze(1)                 # (B,1,T,T)
+
+
 def sft_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """assistant のみ教師化した次トークン CE（labels=-100 は無視）。"""
     shift_logits = logits[:, :-1].reshape(-1, logits.size(-1))
@@ -135,19 +206,23 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
               weight_decay: float = 0.1, grad_clip: float = 1.0,
               select_topp: float = 1.0, mup: bool = False, mup_base_width: int = 256,
               precision: str = "bf16", grad_accum: int = 1,
+              pack: bool = True, neftune_alpha: float = 0.0,
               log_every: int = 10, ckpt_every: int = 0,
               device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     """SFT ループ。事前学習と同じ効率化を共有する: MTP 補助損失（cfg.mtp_depth>0 なら
     checkpoint から継承した MTP を assistant マスク付きで学習）、選択的 backprop
-    （select_topp<1.0）、μP 幅転移（mup）、Muon/WSD、非有限ガード。"""
+    （select_topp<1.0）、μP 幅転移（mup）、bf16、Muon/WSD、非有限ガード。加えて SFT 専用に
+    シーケンスパッキング（pack、境界マスク付き）と NEFTune（neftune_alpha>0）。"""
     torch.manual_seed(seed)
-    data = SFTDataset(conversations, tokenizer, max_len)
+    data = (PackedSFTDataset(conversations, tokenizer, max_len) if pack
+            else SFTDataset(conversations, tokenizer, max_len))
     assert len(data) > 0, "教師化できる会話がありません"
 
     model = SuzumeGlmDsa(cfg).to(device).train()
     if init_from:                                   # 事前学習済みから継続するのが通常
         model.load_state_dict(
             torch.load(init_from, map_location="cpu", weights_only=False)["model"])
+    model.neftune_alpha = neftune_alpha             # 0.0 で無効（推論・export では常に 0）
 
     eff_lr = _mup_lr(lr, cfg, mup, mup_base_width)
     opt = build_optimizer(model, eff_lr, weight_decay, optimizer, muon_lr)
@@ -162,14 +237,20 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
         opt.zero_grad(set_to_none=True)
         main_acc = mtp_acc = 0.0
         for _ in range(grad_accum):
-            x, y = next(stream)
+            batch = next(stream)
+            if pack:
+                x, y, seg = batch
+                attn_mask = segment_causal_mask(seg.to(device))
+            else:
+                x, y = batch
+                attn_mask = None
             x, y = x.to(device), y.to(device)
             # メイン/MTP を「位置 i で token i+1 を予測」に揃える（labels を左シフト）。
             # 非教師位置は IGNORE のままなので compute_loss がマスクする（assistant のみ学習）。
             targets = torch.full_like(y, IGNORE)
             targets[:, :-1] = y[:, 1:]
             with torch.autocast(device_type=dev_type, dtype=amp_dtype, enabled=use_amp):
-                logits, info = model(x)
+                logits, info = model(x, attn_mask=attn_mask)
                 loss, parts = compute_loss(logits, info, targets, cfg.mtp_loss_coef,
                                            select_topp=select_topp, ignore_index=IGNORE)
             scaler.scale(loss / grad_accum).backward()
@@ -197,6 +278,7 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
         if ckpt_every and step > 0 and step % ckpt_every == 0:
             save_checkpoint(out / f"sft_step{step}.pt", model, opt, step)
 
+    model.neftune_alpha = 0.0                       # 学習後は無効化（保存物に影響させない）
     save_checkpoint(out / "sft_model.pt", model, opt, steps)
     return model
 
@@ -230,6 +312,10 @@ def main() -> None:
                     help="混合精度（CUDA のみ有効。bf16 推奨）")
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="勾配累積のマイクロバッチ数（実効 batch = batch×accum）")
+    ap.add_argument("--pack", action=argparse.BooleanOptionalAction, default=True,
+                    help="シーケンスパッキング（境界マスク付き）。--no-pack で無効")
+    ap.add_argument("--neftune", type=float, default=0.0, dest="neftune_alpha",
+                    help="NEFTune 埋め込みノイズの強さ（例 5.0）。0 で無効")
     ap.add_argument("--out", default="output_sft")
     ap.add_argument("--ckpt-every", type=int, default=500)
     ap.add_argument("--device", default="cpu")
@@ -268,10 +354,12 @@ def main() -> None:
               muon_lr=args.muon_lr, lr_schedule=args.lr_schedule, warmup=args.warmup,
               select_topp=args.select_topp, mup=args.mup, mup_base_width=args.mup_base_width,
               precision=args.precision, grad_accum=args.grad_accum,
+              pack=args.pack, neftune_alpha=args.neftune_alpha,
               ckpt_every=args.ckpt_every, device=args.device)
 
 
-__all__ = ["SFTDataset", "sft_loss", "sft_train", "load_sft_conversations"]
+__all__ = ["SFTDataset", "PackedSFTDataset", "segment_causal_mask", "sft_loss",
+           "sft_train", "load_sft_conversations"]
 
 
 if __name__ == "__main__":

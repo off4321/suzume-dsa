@@ -28,8 +28,8 @@ class Block(nn.Module):
         self.ffn_norm = RMSNorm(cfg.n_embd, cfg.norm_eps)
         self.ffn = DenseFFN(cfg) if self.is_dense else SharedExpertMoE(cfg)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x))
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+        x = x + self.attn(self.attn_norm(x), attn_mask=attn_mask)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 

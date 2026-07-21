@@ -27,10 +27,11 @@ class MTPModule(nn.Module):
         self.eh_proj = nn.Linear(2 * cfg.n_embd, cfg.n_embd, bias=False)
         self.block = Block(cfg, layer_idx)               # 本体と同じ構造を 1 段
 
-    def forward(self, h: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
+    def forward(self, h: torch.Tensor, e: torch.Tensor,
+                attn_mask: torch.Tensor | None = None) -> torch.Tensor:
         """h, e: (B, T', D) -> 次段の隠れ状態 (B, T', D)。"""
         x = self.eh_proj(torch.cat([self.hnorm(h), self.enorm(e)], dim=-1))
-        return self.block(x)
+        return self.block(x, attn_mask=attn_mask)
 
 
 __all__ = ["MTPModule"]

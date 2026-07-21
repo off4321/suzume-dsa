@@ -28,6 +28,9 @@ class SuzumeGlmDsa(nn.Module):
         self.token_embd = nn.Embedding(cfg.vocab_size, cfg.n_embd)
         self.blocks = nn.ModuleList(Block(cfg, i) for i in range(cfg.n_layer))
         self.output_norm = RMSNorm(cfg.n_embd, cfg.norm_eps)
+        # NEFTune: 学習時に埋め込みへ一様ノイズを足す（SFT の指示追従を安価に底上げ）。
+        # 0.0=無効。学習ループが必要に応じて設定する（推論・export では常に 0）。
+        self.neftune_alpha = 0.0
 
         # tie 時は lm_head を持たず token_embd を転置流用する
         if cfg.tie_embeddings:
@@ -56,17 +59,24 @@ class SuzumeGlmDsa(nn.Module):
             return x @ self.token_embd.weight.t()
         return self.output(x)
 
-    def forward(self, input_ids: torch.Tensor) -> tuple[torch.Tensor, dict]:
+    def forward(self, input_ids: torch.Tensor,
+                attn_mask: torch.Tensor | None = None) -> tuple[torch.Tensor, dict]:
         """
         Args:
             input_ids: (B, T)
+            attn_mask: 省略時は素の因果マスク（高速パス）。シーケンスパッキング時は
+                       (B,1,T,T) の bool（causal＋同一セグメント、True=attend）を渡す。
         Returns:
             logits: (B, T, vocab_size)
             info:   {"mtp_logits": [ (B, T-k, V), ... ]}（学習時 MTP 有効時のみ）
         """
         x = self.token_embd(input_ids)
+        if self.training and self.neftune_alpha > 0.0:      # NEFTune 埋め込みノイズ
+            d = x.size(-1) * x.size(1)
+            noise = (torch.rand_like(x) * 2 - 1) * (self.neftune_alpha / (d ** 0.5))
+            x = x + noise
         for block in self.blocks:
-            x = block(x)
+            x = block(x, attn_mask=attn_mask)
 
         h = x                      # final norm 前（MTP が使う）
         logits = self._logits(self.output_norm(x))
@@ -77,7 +87,10 @@ class SuzumeGlmDsa(nn.Module):
             h_k = h
             for k, mod in enumerate(self.mtp, start=1):
                 e = self.token_embd(input_ids[:, k:])
-                h_k = mod(h_k[:, :-1], e)
+                hk_in = h_k[:, :-1]
+                # パッキング時は先頭 L×L の部分マスクが hk_in の位置に対応（セグメントIDは不変）
+                m = attn_mask[..., :hk_in.size(1), :hk_in.size(1)] if attn_mask is not None else None
+                h_k = mod(hk_in, e, attn_mask=m)
                 mtp_logits.append(self._logits(self.output_norm(h_k)))
             info["mtp_logits"] = mtp_logits
         return logits, info

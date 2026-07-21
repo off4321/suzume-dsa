@@ -15,8 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from suzume_dsa import TINY, SuzumeGlmDsa  # noqa: E402
 from suzume_dsa.chat import (IGNORE, build_sft_example,  # noqa: E402
                              conversation_from_columns, normalize_turn, parse_harmony)
-from suzume_dsa.sft import (SFTDataset, _parse_sft_field,  # noqa: E402
-                            _row_to_turns, sft_loss, sft_train)
+from suzume_dsa.sft import (PackedSFTDataset, SFTDataset,  # noqa: E402
+                            _parse_sft_field, _row_to_turns, segment_causal_mask,
+                            sft_loss, sft_train)
 from suzume_dsa.tokenizer import SPTokenizer, train_spm  # noqa: E402
 
 
@@ -104,6 +105,57 @@ def test_sft_uses_mtp_and_select_topp():
               out_dir=out, select_topp=0.7, mup=True, log_every=1000)
 
 
+def test_packing_and_segment_mask():
+    """パッキングで max_len を超えず、セグメントマスクが境界を跨ぐ attention を止める。"""
+    tok = _tokenizer()
+    packed = PackedSFTDataset(CONV * 12, tok, max_len=48)
+    assert len(packed) >= 1
+    x, y, seg = next(packed.batches(2))
+    assert x.shape == y.shape == seg.shape and x.size(1) == 48
+    # マスク: 実トークンは別セグメント/pad を参照しない。全マスク行は無い（各行に自己）。
+    mask = segment_causal_mask(seg)                 # (B,1,T,T) bool
+    assert mask.dtype == torch.bool and mask.shape == (2, 1, 48, 48)
+    B, _, T, _ = mask.shape
+    for b in range(B):
+        for i in range(T):
+            assert mask[b, 0, i, i], "自己 attention が無い行がある（nan の元）"
+            for j in range(T):
+                if mask[b, 0, i, j]:
+                    assert j <= i, "causal 違反"
+                    assert seg[b, i] == seg[b, j], "セグメント跨ぎを許してしまっている"
+
+
+def test_sft_pack_and_neftune_run():
+    """pack=True（境界マスク）+ NEFTune + MTP で SFT ループが有限で回る。"""
+    tok = _tokenizer()
+    cfg = replace(TINY, vocab_size=tok.vocab_size, mtp_depth=1)
+    out = tempfile.mkdtemp()
+    sft_train(cfg, CONV * 12, tok, steps=4, batch_size=2, max_len=48, lr=1e-3,
+              out_dir=out, pack=True, neftune_alpha=5.0, log_every=1000)
+    # pack=False 経路も動く
+    sft_train(replace(TINY, vocab_size=tok.vocab_size), CONV * 8, tok, steps=3,
+              batch_size=4, max_len=64, lr=1e-3, out_dir=out, pack=False, log_every=1000)
+
+
+def test_neftune_perturbs_train_only():
+    """NEFTune は training 時だけ埋め込みにノイズを足す（eval は決定的）。"""
+    tok = _tokenizer()
+    cfg = replace(TINY, vocab_size=tok.vocab_size)
+    model = SuzumeGlmDsa(cfg)
+    model.neftune_alpha = 10.0
+    x = torch.randint(0, cfg.vocab_size, (2, 16))
+    model.eval()
+    with torch.no_grad():
+        a, _ = model(x)
+        b, _ = model(x)
+    assert torch.allclose(a, b), "eval では NEFTune が効いてはいけない"
+    model.train()
+    with torch.no_grad():
+        c, _ = model(x)
+        d, _ = model(x)
+    assert not torch.allclose(c, d), "train では NEFTune のノイズで出力が変わるはず"
+
+
 def test_sft_field_parsing_and_conversion():
     """spec 4 番目フィールドの各形式（列名 / mapping / harmony）を会話へ変換できる。"""
     # 列マッピング DSL: 別カラム → user→assistant（reasoning は <think> で包む）
@@ -140,5 +192,8 @@ if __name__ == "__main__":
     test_sft_loop_runs_and_masks()
     test_sft_uses_checkpoint_cfg_not_4b()
     test_sft_uses_mtp_and_select_topp()
+    test_packing_and_segment_mask()
+    test_sft_pack_and_neftune_run()
+    test_neftune_perturbs_train_only()
     test_sft_field_parsing_and_conversion()
     print("all sft tests passed")

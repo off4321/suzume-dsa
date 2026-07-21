@@ -63,7 +63,7 @@ class MultiHeadLatentAttention(nn.Module):
         # RoPE は rope 次元にだけ掛ける
         self.rotary = RotaryEmbedding(self.rope, base=cfg.rope_base)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None = None) -> torch.Tensor:
         B, T, _ = x.shape
 
         # --- Q ---
@@ -88,8 +88,13 @@ class MultiHeadLatentAttention(nn.Module):
         q = torch.cat([q_nope, q_rope], dim=-1)            # (B, H, T, hk)
         k = torch.cat([k_nope, k_rope], dim=-1)            # (B, H, T, hk)
 
-        # 因果アテンション
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.scale)
+        # 因果アテンション。attn_mask 指定時（シーケンスパッキング）はそれを使う
+        # （causal＋同一セグメントを bool で内包。is_causal と併用不可なので False）。
+        if attn_mask is None:
+            attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=self.scale)
+        else:
+            attn = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask,
+                                                  scale=self.scale)
         attn = attn.transpose(1, 2).reshape(B, T, self.n_head * self.hv)
         return self.wo(attn)
 
