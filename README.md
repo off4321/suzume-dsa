@@ -90,9 +90,23 @@ docs/                  gguf-scope / glm-dsa-tensors / training-efficiency
 - [x] **uv 対応**（CPU/CUDA torch グループ切替、`suzume-dsa-train` エントリポイント）
 - [x] **tools/**（count_params / vram_calibrate / check_dataset を移植）
 - [x] **HF datasets 対応**（`data.py` の preview_hf_dataset / load_hf_tokens）
-- [ ] 本番トークナイザ（現状は疎通用のバイト単位。SentencePiece 語彙へ差し替え）
-- [ ] 残りのループ側効率化（深さ成長 `--init-from` / μP / WSD / Muon / FIM / 動的データ選別）
-- [ ] SFT ステージ移植 / v2: DSA indexer / v3: NextN
+- [x] **本番 SentencePiece トークナイザ**（`tokenizer.py`、train_spm + 実語彙の GGUF 書き出し）
+- [x] **ループ側効率化フル**: Muon（`optim.py`）/ WSD・cosine スケジュール / μP `--mup` /
+      FIM `--fim`（`fim.py`）/ 選択的 backprop `--select-topp` / 深さ成長 `--init-from`
+- [x] **SFT ステージ**（`chat.py` + `sft.py`、assistant のみ教師化 + マスク損失）
+- [ ] **v2: DSA indexer** — 要 llama.cpp パリティ検証（下記）
+- [~] **v3: NextN** — llama.cpp では "preserved but unused"（推論で使われない）ため
+      **export しない**のが正解。学習効率は MTP（train-only）で既に取得済み
+
+### v2 / v3 の位置づけ（重要）
+
+- **v3 NextN は export しない**: llama.cpp の glm-dsa は NextN テンソルを読み込むが
+  推論では使わない。MTP の学習効率メリットは train-only 補助損失で既に得ているので、
+  NextN を書いても無意味（`n_layer_nextn=0` のまま）。
+- **v2 DSA indexer は専用の検証が必要**: llama.cpp の `build_lid_top_k` は RoPE 付き
+  indexer ヘッド + compressor + top-k 選択という具体的アルゴリズム。学習側と llama.cpp
+  側で**同一でないと export したモデルが壊れる**（v1 は indexer 無し＝正しい dense
+  フォールバックで動作確認済み）。indexer はパリティ検証込みの独立タスクとして実装する。
 
 ## 最小 pretrain
 
