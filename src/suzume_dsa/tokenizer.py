@@ -75,6 +75,9 @@ def train_spm(corpus_path: str, out_prefix: str, vocab_size: int = 32000,
         byte_fallback=True,
         max_sentence_length=1 << 20,      # 長い行も1文として扱う（既定4192で切られるのを回避）
         hard_vocab_limit=False,           # vocab_size を上限扱い（小コーパスでも学習を通す）
+        # 大規模コーパス（総文字数が int32=約21億を超える）でも学習を通す。
+        # 超えると "Input corpus too large" で落ちるため常時有効化（小コーパスでも安全）。
+        train_extremely_large_corpus=True,
     )
     return str(Path(out_prefix).with_suffix(".model"))
 

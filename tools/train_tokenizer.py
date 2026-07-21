@@ -45,7 +45,9 @@ def _dump_hf_to_text(specs, out_txt: Path, max_samples: int, hf_token: str | Non
                     col = column or _guess_text_column(row)
                     text = _cell_to_text(row.get(col)) if col else ""
                     if text:
-                        f.write(text.replace("\n", " ") + "\n")
+                        # 改行は空白へ（1行=1文）。ヌル文字は SP が文ごと捨てる
+                        # （"Found null character" 警告）ので事前に除去する。
+                        f.write(text.replace("\n", " ").replace("\x00", "") + "\n")
                         n += 1
             except Exception as e:  # noqa: BLE001 - 1 件ダメでも継続
                 print(f"[warn] スキップ（読込失敗）: {spec}  ({type(e).__name__}: {e})")
