@@ -32,6 +32,20 @@ def test_architecture_is_glm_dsa():
     assert arch.parts[arch.data[0]].tobytes().decode() == "glm-dsa"
 
 
+def test_name_and_chat_template_written():
+    """--name / default_system で general.name と chat_template が GGUF に入る。"""
+    model = SuzumeGlmDsa(TINY).eval()
+    path = Path(tempfile.mkdtemp()) / "id.gguf"
+    export(model, str(path), name="suzume-dsa",
+           default_system="あなたはすずめ(suzume-dsa)です。")
+    r = gguf.GGUFReader(str(path))
+    nm = r.get_field("general.name")
+    assert nm.parts[nm.data[0]].tobytes().decode() == "suzume-dsa"
+    ct = r.get_field("tokenizer.chat_template")
+    tmpl = ct.parts[ct.data[0]].tobytes().decode()
+    assert "すずめ" in tmpl and "<|im_start|>" in tmpl
+
+
 def test_required_tensors_and_shapes():
     r, cfg = _reader()
     shapes = {t.name: list(t.shape) for t in r.tensors}
@@ -57,5 +71,6 @@ def test_required_tensors_and_shapes():
 
 if __name__ == "__main__":
     test_architecture_is_glm_dsa()
+    test_name_and_chat_template_written()
     test_required_tensors_and_shapes()
     print("all export tests passed")

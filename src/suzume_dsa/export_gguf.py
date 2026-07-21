@@ -153,9 +153,23 @@ def write_sp_tokenizer(w: "gguf.GGUFWriter", tokenizer) -> None:
 
 
 def export(model: SuzumeGlmDsa, path: str, with_tokenizer: bool = True,
-           tokenizer=None) -> str:
+           tokenizer=None, name: str | None = "suzume-dsa",
+           chat_template: str | None = None,
+           default_system: str | None = None) -> str:
+    """GGUF を書き出す。name/chat_template を埋め込むとモデルが自己識別しやすくなる。
+
+    chat_template 未指定でも default_system（既定の名乗りシステムプロンプト）を渡せば
+    ChatML テンプレートを自動生成して埋め込む。どちらも None なら従来どおり書かない。
+    """
     w = gguf.GGUFWriter(path, arch="glm-dsa")
     write_metadata(w, model.cfg)
+    if name and hasattr(w, "add_name"):
+        w.add_name(name)
+    if chat_template is None and default_system:
+        from .chat import build_chatml_template
+        chat_template = build_chatml_template(default_system)
+    if chat_template and hasattr(w, "add_chat_template"):
+        w.add_chat_template(chat_template)
     if tokenizer is not None and hasattr(tokenizer, "gguf_vocab"):
         write_sp_tokenizer(w, tokenizer)          # 本番: 実 SentencePiece 語彙
     elif with_tokenizer:
@@ -175,6 +189,9 @@ def main() -> None:
     ap.add_argument("--checkpoint", help="学習済み checkpoint(.pt)。省略時は TINY を書き出し")
     ap.add_argument("--sp-model", help="SentencePiece .model（本番語彙を GGUF に埋め込む）")
     ap.add_argument("--out", default="suzume.gguf")
+    ap.add_argument("--name", default="suzume-dsa", help="general.name（モデル名）")
+    ap.add_argument("--default-system", default=None,
+                    help="既定システムプロンプト（名乗り）。ChatML テンプレートに埋め込む")
     args = ap.parse_args()
 
     tok = None
@@ -192,7 +209,8 @@ def main() -> None:
         from .tokenizer import SPTokenizer
         tok = SPTokenizer(args.sp_model)
 
-    export(model, args.out, tokenizer=tok)
+    export(model, args.out, tokenizer=tok, name=args.name,
+           default_system=args.default_system)
     print(f"wrote {args.out}  (vocab={'SP:'+args.sp_model if tok else 'byte-dummy'})")
 
 

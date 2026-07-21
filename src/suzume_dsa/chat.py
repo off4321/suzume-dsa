@@ -89,6 +89,28 @@ def parse_harmony(text: str) -> list[dict]:
     return turns
 
 
+def build_chatml_template(default_system: str) -> str:
+    """ChatML の Jinja チャットテンプレート（GGUF の tokenizer.chat_template 用）。
+
+    system メッセージが無いときは default_system を自動注入する。これにより
+    llama.cpp 側で「名乗り」の既定システムプロンプトが常に効く（アイデンティティ）。
+    """
+    ds = default_system.replace('"', '\\"')
+    return (
+        "{% if messages[0]['role'] == 'system' %}"
+        "{{ '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}"
+        "{% set loop_messages = messages[1:] %}"
+        "{% else %}"
+        f"{{{{ '<|im_start|>system\\n{ds}<|im_end|>\\n' }}}}"
+        "{% set loop_messages = messages %}"
+        "{% endif %}"
+        "{% for message in loop_messages %}"
+        "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n' }}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    )
+
+
 def normalize_turn(turn: dict) -> dict:
     """{"role","content"} へ正規化（from/value や reasoning 形式にも軽く対応）。"""
     role = turn.get("role") or turn.get("from") or "user"
@@ -119,4 +141,4 @@ def build_sft_example(messages: list[dict], tokenizer) -> tuple[list[int], list[
 
 
 __all__ = ["build_sft_example", "normalize_turn", "conversation_from_columns",
-           "parse_harmony", "IM_START", "IM_END", "IGNORE"]
+           "parse_harmony", "build_chatml_template", "IM_START", "IM_END", "IGNORE"]

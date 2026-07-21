@@ -171,6 +171,26 @@ def _row_to_turns(row: dict, mode: str, arg, *, normalize):
     return list(row.get("messages") or row.get("conversations") or [])
 
 
+def load_jsonl_conversations(path: str) -> list[list[dict]]:
+    """ローカル JSONL（1 行 = {"messages"|"conversations": [...]}) を会話リストへ。
+
+    アイデンティティデータ等、HF にない自作データを SFT に混ぜるための入口。
+    """
+    import json
+
+    convs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            turns = row.get("messages") or row.get("conversations") or row
+            if isinstance(turns, list) and turns:
+                convs.append(list(turns))
+    return convs
+
+
 def load_sft_conversations(spec: str, *, split: str | None = None,
                            max_samples: int | None = None, hf_token: str | None = None,
                            stream: bool = True) -> list[list[dict]]:
@@ -294,9 +314,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="suzume-dsa SFT")
     ap.add_argument("--sp-model", required=True, help="SentencePiece .model")
     ap.add_argument("--init-from", required=True, help="事前学習済み checkpoint(.pt)")
-    ap.add_argument("--hf-sft-dataset", nargs="+", required=True,
+    ap.add_argument("--hf-sft-dataset", nargs="+", default=[],
                     help='会話データ "path[:config][:split]"（messages/conversations カラム）。'
                          '複数指定で全部を連結。読めない spec は警告してスキップ')
+    ap.add_argument("--extra-jsonl", nargs="+", default=[],
+                    help="ローカル JSONL の会話を混ぜる（自作アイデンティティ等）")
     ap.add_argument("--hf-max-samples", type=int, default=None)
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--batch-size", type=int, default=8)
@@ -351,7 +373,11 @@ def main() -> None:
             continue
         print(f"[sft] {spec}: {len(part)} 会話")
         convs.extend(part)
-    assert convs, "有効な会話データが 0 件でした。spec を確認してください。"
+    for jf in args.extra_jsonl:                      # ローカル JSONL（アイデンティティ等）
+        part = load_jsonl_conversations(jf)
+        print(f"[sft] {jf}: {len(part)} 会話（local jsonl）")
+        convs.extend(part)
+    assert convs, "有効な会話データが 0 件でした。--hf-sft-dataset か --extra-jsonl を確認。"
     print(f"会話 合計 {len(convs)} 件を読込")
     if cfg.mtp_depth > 0:
         print(f"MTP 有効（depth={cfg.mtp_depth}）: 事前学習から継承した MTP を SFT でも学習")
@@ -367,7 +393,7 @@ def main() -> None:
 
 
 __all__ = ["SFTDataset", "PackedSFTDataset", "segment_causal_mask", "sft_loss",
-           "sft_train", "load_sft_conversations"]
+           "sft_train", "load_sft_conversations", "load_jsonl_conversations"]
 
 
 if __name__ == "__main__":

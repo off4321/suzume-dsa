@@ -156,6 +156,41 @@ def test_neftune_perturbs_train_only():
     assert not torch.allclose(c, d), "train では NEFTune のノイズで出力が変わるはず"
 
 
+def test_identity_conversations_and_jsonl(tmp_path=None):
+    """アイデンティティ生成→JSONL→load_jsonl_conversations→SFT が通る。"""
+    import json
+    import sys as _sys
+    from pathlib import Path as _P
+    _sys.path.insert(0, str(_P(__file__).resolve().parents[1] / "tools"))
+    from make_identity_data import identity_conversations
+    from suzume_dsa.sft import load_jsonl_conversations
+
+    convs = identity_conversations(name="suzume-dsa", creator="", n=30, seed=1)
+    assert len(convs) == 30
+    for c in convs:
+        assert [t["role"] for t in c] == ["user", "assistant"]
+        assert "suzume-dsa" in c[1]["content"]        # 名乗りが入っている
+    # JSONL 往復
+    d = tempfile.mkdtemp()
+    p = f"{d}/identity.jsonl"
+    with open(p, "w", encoding="utf-8") as f:
+        for c in convs:
+            f.write(json.dumps({"messages": c}, ensure_ascii=False) + "\n")
+    loaded = load_jsonl_conversations(p)
+    assert len(loaded) == 30 and loaded[0][0]["role"] == "user"
+    # SFT に混ぜて回る
+    tok = _tokenizer()
+    cfg = replace(TINY, vocab_size=tok.vocab_size)
+    sft_train(cfg, loaded, tok, steps=3, batch_size=2, max_len=64, lr=1e-3,
+              out_dir=d, log_every=1000)
+
+
+def test_chatml_template_injects_default_system():
+    from suzume_dsa.chat import build_chatml_template
+    t = build_chatml_template("あなたはすずめです。")
+    assert "あなたはすずめです。" in t and "<|im_start|>" in t and "add_generation_prompt" in t
+
+
 def test_sft_field_parsing_and_conversion():
     """spec 4 番目フィールドの各形式（列名 / mapping / harmony）を会話へ変換できる。"""
     # 列マッピング DSL: 別カラム → user→assistant（reasoning は <think> で包む）
@@ -195,5 +230,7 @@ if __name__ == "__main__":
     test_packing_and_segment_mask()
     test_sft_pack_and_neftune_run()
     test_neftune_perturbs_train_only()
+    test_identity_conversations_and_jsonl()
+    test_chatml_template_injects_default_system()
     test_sft_field_parsing_and_conversion()
     print("all sft tests passed")
