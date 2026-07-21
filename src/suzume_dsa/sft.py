@@ -20,7 +20,7 @@ from .chat import IGNORE, build_sft_example
 from .config import GlmDsaConfig
 from .model import SuzumeGlmDsa
 from .optim import build_optimizer, build_scheduler
-from .train import _mup_lr, compute_loss, load_checkpoint, save_checkpoint
+from .train import _mup_lr, compute_loss, load_checkpoint, make_amp, save_checkpoint
 
 
 class SFTDataset:
@@ -134,6 +134,7 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
               muon_lr: float = 0.02, lr_schedule: str = "cosine", warmup: int = 0,
               weight_decay: float = 0.1, grad_clip: float = 1.0,
               select_topp: float = 1.0, mup: bool = False, mup_base_width: int = 256,
+              precision: str = "bf16", grad_accum: int = 1,
               log_every: int = 10, ckpt_every: int = 0,
               device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     """SFT ループ。事前学習と同じ効率化を共有する: MTP 補助損失（cfg.mtp_depth>0 なら
@@ -154,34 +155,44 @@ def sft_train(cfg: GlmDsaConfig, conversations: list[list[dict]], tokenizer, *,
     gen = torch.Generator().manual_seed(seed)
     stream = data.batches(batch_size, generator=gen)
     out = Path(out_dir)
+    dev_type, amp_dtype, use_amp, scaler = make_amp(precision, device)
 
     n_skipped = 0
     for step in range(steps):
-        x, y = next(stream)
-        x, y = x.to(device), y.to(device)
-        # メイン/MTP を「位置 i で token i+1 を予測」に揃える（labels を左シフト）。
-        # 非教師位置は IGNORE のままなので compute_loss がマスクする（assistant のみ学習）。
-        targets = torch.full_like(y, IGNORE)
-        targets[:, :-1] = y[:, 1:]
-        logits, info = model(x)
-        loss, parts = compute_loss(logits, info, targets, cfg.mtp_loss_coef,
-                                   select_topp=select_topp, ignore_index=IGNORE)
-
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        finite = torch.isfinite(loss) and all(
-            torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+        main_acc = mtp_acc = 0.0
+        for _ in range(grad_accum):
+            x, y = next(stream)
+            x, y = x.to(device), y.to(device)
+            # メイン/MTP を「位置 i で token i+1 を予測」に揃える（labels を左シフト）。
+            # 非教師位置は IGNORE のままなので compute_loss がマスクする（assistant のみ学習）。
+            targets = torch.full_like(y, IGNORE)
+            targets[:, :-1] = y[:, 1:]
+            with torch.autocast(device_type=dev_type, dtype=amp_dtype, enabled=use_amp):
+                logits, info = model(x)
+                loss, parts = compute_loss(logits, info, targets, cfg.mtp_loss_coef,
+                                           select_topp=select_topp, ignore_index=IGNORE)
+            scaler.scale(loss / grad_accum).backward()
+            main_acc += parts["main"] / grad_accum
+            mtp_acc += parts["mtp"] / grad_accum
+
+        if scaler.is_enabled():
+            scaler.unscale_(opt)
+        finite = all(torch.isfinite(p.grad).all()
+                     for p in model.parameters() if p.grad is not None)
         if not finite:
             n_skipped += 1
+            scaler.update()
             opt.zero_grad(set_to_none=True)
             continue
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         sched.step()
         model.commit_router_bias_updates()
 
         if step % log_every == 0:
-            print(f"sft {step:>6} | loss {parts['main']:.4f} | mtp {parts['mtp']:.4f} "
+            print(f"sft {step:>6} | loss {main_acc:.4f} | mtp {mtp_acc:.4f} "
                   f"| skipped {n_skipped}")
         if ckpt_every and step > 0 and step % ckpt_every == 0:
             save_checkpoint(out / f"sft_step{step}.pt", model, opt, step)
@@ -215,6 +226,10 @@ def main() -> None:
                     help="選択的 backprop: assistant トークンの損失上位この割合だけ学習（<1.0 で有効）")
     ap.add_argument("--mup", action="store_true", help="μP 幅転移（LR を基準幅で調整）")
     ap.add_argument("--mup-base-width", type=int, default=256)
+    ap.add_argument("--precision", default="bf16", choices=["fp32", "bf16", "fp16"],
+                    help="混合精度（CUDA のみ有効。bf16 推奨）")
+    ap.add_argument("--grad-accum", type=int, default=1,
+                    help="勾配累積のマイクロバッチ数（実効 batch = batch×accum）")
     ap.add_argument("--out", default="output_sft")
     ap.add_argument("--ckpt-every", type=int, default=500)
     ap.add_argument("--device", default="cpu")
@@ -252,6 +267,7 @@ def main() -> None:
               init_from=args.init_from, optimizer=args.optimizer,
               muon_lr=args.muon_lr, lr_schedule=args.lr_schedule, warmup=args.warmup,
               select_topp=args.select_topp, mup=args.mup, mup_base_width=args.mup_base_width,
+              precision=args.precision, grad_accum=args.grad_accum,
               ckpt_every=args.ckpt_every, device=args.device)
 
 

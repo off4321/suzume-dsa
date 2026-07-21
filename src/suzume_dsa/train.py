@@ -108,6 +108,19 @@ def _mup_lr(lr: float, cfg: GlmDsaConfig, mup: bool, base_width: int) -> float:
     return lr * (base_width / cfg.n_embd) if mup else lr
 
 
+def make_amp(precision: str, device):
+    """混合精度の道具を返す (dev_type, amp_dtype, use_amp, scaler)。
+
+    autocast は CUDA のときだけ有効化する（CPU は fp32 のまま＝テスト決定的）。
+    bf16 は GradScaler 不要、fp16 のときだけ scaler を使う（勾配のアンダーフロー対策）。
+    """
+    dev_type = "cuda" if str(device).startswith("cuda") else "cpu"
+    use_amp = precision in ("bf16", "fp16") and dev_type == "cuda"
+    amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
+    scaler = torch.amp.GradScaler(dev_type, enabled=(use_amp and precision == "fp16"))
+    return dev_type, amp_dtype, use_amp, scaler
+
+
 def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size: int,
           lr: float, out_dir: str, tokenizer=None, resume: str | None = None,
           init_from: str | None = None, block_size_schedule: str | None = None,
@@ -117,6 +130,7 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
           mup: bool = False, mup_base_width: int = 256,
           fim_rate: float = 0.0, fim_spm_prob: float = 0.5, select_topp: float = 1.0,
           weight_decay: float = 0.1, grad_clip: float = 1.0,
+          precision: str = "bf16", grad_accum: int = 1,
           log_every: int = 10, ckpt_every: int = 200,
           device: str = "cpu", seed: int = 0) -> SuzumeGlmDsa:
     torch.manual_seed(seed)
@@ -146,39 +160,50 @@ def train(cfg: GlmDsaConfig, corpus, *, steps: int, batch_size: int, block_size:
     start = load_checkpoint(Path(resume), model, opt) if resume else 0
     gen = torch.Generator().manual_seed(seed)
     out = Path(out_dir)
+    dev_type, amp_dtype, use_amp, scaler = make_amp(precision, device)
 
     n_skipped = 0
     for step in range(start, steps):
         cur_block = block_size_at(step, schedule) if schedule else block_size
         cur_batch = batch_size_at(step, batch_sched) if batch_sched else batch_size
-        if fim_ids is not None:
-            x, y = build_fim_batch(tokens, cur_batch, cur_block, fim_ids, gen,
-                                   fim_rate, fim_spm_prob)
-        else:
-            x, y = data.sample(cur_batch, cur_block, generator=gen)
-        x, y = x.to(device), y.to(device)
-        logits, info = model(x)
-        loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef, select_topp)
 
+        # grad_accum マイクロバッチ分の勾配を貯めてから 1 回 step（実効 batch = batch×accum）。
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        main_acc = mtp_acc = 0.0
+        for _ in range(grad_accum):
+            if fim_ids is not None:
+                x, y = build_fim_batch(tokens, cur_batch, cur_block, fim_ids, gen,
+                                       fim_rate, fim_spm_prob)
+            else:
+                x, y = data.sample(cur_batch, cur_block, generator=gen)
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device_type=dev_type, dtype=amp_dtype, enabled=use_amp):
+                logits, info = model(x)
+                loss, parts = compute_loss(logits, info, y, cfg.mtp_loss_coef, select_topp)
+            scaler.scale(loss / grad_accum).backward()
+            main_acc += parts["main"] / grad_accum
+            mtp_acc += parts["mtp"] / grad_accum
 
-        # 非有限ガード: loss か勾配が壊れていたら、その step は捨てる（汚染を広げない）
-        finite = torch.isfinite(loss) and all(
-            torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+        # 非有限ガード: 勾配が壊れていたら、その step は捨てる（汚染を広げない）。
+        if scaler.is_enabled():
+            scaler.unscale_(opt)                     # clip/check の前に実勾配へ戻す
+        finite = all(torch.isfinite(p.grad).all()
+                     for p in model.parameters() if p.grad is not None)
         if not finite:
             n_skipped += 1
+            scaler.update()
             opt.zero_grad(set_to_none=True)
             continue
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         sched.step()
         model.commit_router_bias_updates()          # aux-free ロードバランス
 
         if step % log_every == 0:
-            print(f"step {step:>6} | block {cur_block:>4} | batch {cur_batch:>3} "
-                  f"| loss {parts['main']:.4f} | mtp {parts['mtp']:.4f} "
+            print(f"step {step:>6} | block {cur_block:>4} | batch {cur_batch:>3}x{grad_accum} "
+                  f"| loss {main_acc:.4f} | mtp {mtp_acc:.4f} "
                   f"| lr {sched.get_last_lr()[0]:.2e} | skipped {n_skipped}")
         if ckpt_every and step > start and step % ckpt_every == 0:
             save_checkpoint(out / f"checkpoint_step{step}.pt", model, opt, step)
@@ -219,6 +244,10 @@ def main() -> None:
                     help="FIM 化する窓の割合（SentencePiece 語彙のみ有効）")
     ap.add_argument("--select-topp", type=float, default=1.0,
                     help="選択的 backprop: 損失上位この割合のトークンだけ学習（<1.0 で有効）")
+    ap.add_argument("--precision", default="bf16", choices=["fp32", "bf16", "fp16"],
+                    help="混合精度（CUDA のみ有効。bf16 推奨で約2倍速・メモリ半減）")
+    ap.add_argument("--grad-accum", type=int, default=1,
+                    help="勾配累積のマイクロバッチ数（実効 batch = batch×accum）")
     ap.add_argument("--sp-model", default=None, help="SentencePiece .model（本番語彙）")
     # モデル寸法: プリセット選択 + 個別レバー上書き（GlmDsaConfig の全フィールド）
     ap.add_argument("--preset", default=None, choices=["4b", "05b", "tiny"],
@@ -274,7 +303,8 @@ def main() -> None:
           lr_schedule=args.lr_schedule, warmup=args.warmup,
           wsd_decay_frac=args.wsd_decay_frac, mup=args.mup,
           mup_base_width=args.mup_base_width, fim_rate=args.fim_rate,
-          select_topp=args.select_topp, device=args.device)
+          select_topp=args.select_topp, precision=args.precision,
+          grad_accum=args.grad_accum, device=args.device)
 
 
 if __name__ == "__main__":

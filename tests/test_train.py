@@ -122,6 +122,24 @@ def test_batch_curriculum_run():
     assert after < before
 
 
+def test_grad_accum_run():
+    """勾配累積 (grad_accum>1) で 1-run 完走し loss が下がる。CPU では fp32 経路。"""
+    cfg = TINY
+    out = tempfile.mkdtemp()
+    model = train(cfg, CORPUS, steps=40, batch_size=4, block_size=64, grad_accum=3,
+                  lr=3e-3, out_dir=out, log_every=1000, ckpt_every=0, seed=0)
+    before = _avg_loss(SuzumeGlmDsa(cfg), cfg)
+    after = _avg_loss(model, cfg)
+    assert after < before
+
+
+def test_make_amp_cpu_is_fp32():
+    """CPU では autocast を無効化（fp32・決定的）、scaler も無効であること。"""
+    from suzume_dsa.train import make_amp
+    dev_type, amp_dtype, use_amp, scaler = make_amp("bf16", "cpu")
+    assert dev_type == "cpu" and use_amp is False and scaler.is_enabled() is False
+
+
 if __name__ == "__main__":
     test_loss_decreases()
     test_mtp_loss_finite()
@@ -130,4 +148,6 @@ if __name__ == "__main__":
     test_curriculum_run()
     test_batch_size_schedule_parse()
     test_batch_curriculum_run()
+    test_grad_accum_run()
+    test_make_amp_cpu_is_fp32()
     print("all train smoke tests passed")
