@@ -63,8 +63,26 @@ class SPTokenizer:
 
 def train_spm(corpus_path: str, out_prefix: str, vocab_size: int = 32000,
               character_coverage: float = 0.9995,
-              special_tokens: list[str] | None = None) -> str:
-    """コーパスから SentencePiece(unigram) を学習し .model を書き出してパスを返す。"""
+              special_tokens: list[str] | None = None,
+              input_sentence_size: int = 0,
+              shuffle_input_sentence: bool = False,
+              seed_sentencepiece_size: int = 1_000_000) -> str:
+    """コーパスから SentencePiece(unigram) を学習し .model を書き出してパスを返す。
+
+    input_sentence_size: 0以外を指定すると、学習前にその件数までランダムに間引く
+    （SentencePiece自身が "Too many sentences are loaded" 警告と共に推奨する対処）。
+    32k語彙程度なら数十万〜100万文で十分なことが多く、コーパスが大きすぎて
+    suffix array構築が終わらない（＝チェックポイント不可のため丸ごとやり直しになる）
+    事故を避けられる。shuffle_input_sentenceはinput_sentence_size指定時にTrue推奨
+    （先頭からの偏った間引きを避ける）。
+
+    seed_sentencepiece_size: EMで削っていく前の候補語彙数（既定100万、SentencePiece
+    のライブラリ既定と同じ）。vocab_sizeをこれに近い/超える値（例: 250k）にする場合は、
+    削る余地が無くなり質が落ちるため、vocab_sizeの3〜4倍程度まで引き上げること
+    （例: vocab_size=250000 なら seed_sentencepiece_size=1_000_000〜2_000_000）。
+    suffix array構築のコストはコーパスサイズで決まりvocab_size自体には依らないが、
+    seed_sentencepiece_sizeを上げるとここだけ多少コストが増える。
+    """
     import sentencepiece as spm
     special = SPECIAL_TOKENS if special_tokens is None else special_tokens
     spm.SentencePieceTrainer.train(
@@ -78,6 +96,9 @@ def train_spm(corpus_path: str, out_prefix: str, vocab_size: int = 32000,
         # 大規模コーパス（総文字数が int32=約21億を超える）でも学習を通す。
         # 超えると "Input corpus too large" で落ちるため常時有効化（小コーパスでも安全）。
         train_extremely_large_corpus=True,
+        input_sentence_size=input_sentence_size,
+        shuffle_input_sentence=shuffle_input_sentence,
+        seed_sentencepiece_size=seed_sentencepiece_size,
     )
     return str(Path(out_prefix).with_suffix(".model"))
 

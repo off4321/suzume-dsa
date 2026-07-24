@@ -67,6 +67,15 @@ def main() -> None:
     ap.add_argument("--vocab-size", type=int, default=32000)
     ap.add_argument("--character-coverage", type=float, default=0.9995)
     ap.add_argument("--out", default="tokenizer/sp", help="出力 model_prefix（→ <out>.model）")
+    ap.add_argument("--input-sentence-size", type=int, default=0,
+                    help="0=無制限（既定）。コーパスが大きすぎてsuffix array構築が終わらない"
+                         "（'Too many sentences are loaded' 警告）場合に指定すると、学習前に"
+                         "その件数までランダムに間引く。32k語彙なら80万〜100万あれば十分なことが多い")
+    ap.add_argument("--shuffle-input-sentence", action="store_true",
+                    help="--input-sentence-size指定時は必ず付けること（先頭偏りの間引きを防ぐ）")
+    ap.add_argument("--seed-sentencepiece-size", type=int, default=1_000_000,
+                    help="EMで削る前の候補語彙数（既定100万）。--vocab-sizeをこれに近い/超える"
+                         "値（例:250000）にする場合は、vocab-sizeの3〜4倍程度まで引き上げること")
     args = ap.parse_args()
 
     corpus = args.corpus
@@ -79,7 +88,10 @@ def main() -> None:
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     model_path = train_spm(corpus, args.out, vocab_size=args.vocab_size,
-                           character_coverage=args.character_coverage)
+                           character_coverage=args.character_coverage,
+                           input_sentence_size=args.input_sentence_size,
+                           shuffle_input_sentence=args.shuffle_input_sentence,
+                           seed_sentencepiece_size=args.seed_sentencepiece_size)
     print(f"wrote {model_path}")
 
 

@@ -8,6 +8,7 @@ src/suzume_dsa/export_gguf.py
 src/suzume_dsa/fim.py
 src/suzume_dsa/model.py
 src/suzume_dsa/optim.py
+src/suzume_dsa/orpo.py
 src/suzume_dsa/sft.py
 src/suzume_dsa/tokenizer.py
 src/suzume_dsa/train.py
@@ -27,6 +28,7 @@ src/suzume_dsa/modules/norm.py
 src/suzume_dsa/modules/rope.py
 tests/test_efficiency.py
 tests/test_export.py
+tests/test_orpo.py
 tests/test_sft.py
 tests/test_shapes.py
 tests/test_tokenizer_export.py

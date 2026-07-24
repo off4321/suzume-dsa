@@ -1,4 +1,5 @@
 [console_scripts]
 suzume-dsa-export = suzume_dsa.export_gguf:main
+suzume-dsa-orpo = suzume_dsa.orpo:main
 suzume-dsa-sft = suzume_dsa.sft:main
 suzume-dsa-train = suzume_dsa.train:main
